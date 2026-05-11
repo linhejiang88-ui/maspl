@@ -1,118 +1,91 @@
-import { z } from "zod";
-import type { AgentBackend, AgentBackendRunParams } from "../backend/types.js";
-import type { SessionLog } from "../logging/session-log.js";
-import type { AskHuman } from "../tools/ask-human.js";
-import type { RolesConfig } from "../types.js";
+import type { AgentBackend, AgentRunParams } from "../backend/types.js";
 import { loadClaudeSdk, type ClaudeSdkModule } from "./sdk-loader.js";
 
-export type ClaudeRunParams = {
-  goal: string;
-  workspace: string;
-  roles: RolesConfig;
-  log: SessionLog;
-  askHuman: AskHuman;
-  maxTurns?: number;
-  timeoutMs?: number;
+export type ClaudeAgentRunParams = AgentRunParams & {
   sdk?: ClaudeSdkModule;
 };
 
-export const claudeBackend: AgentBackend = {
-  name: "claude",
-  run(params: AgentBackendRunParams) {
-    return runClaudeSession(params);
-  }
+type ClaudeSessionState = {
+  sessionIds: Map<AgentRunParams["agent"], string>;
+  sessionOwners: Map<string, AgentRunParams["agent"]>;
 };
 
-export async function runClaudeSession(params: ClaudeRunParams): Promise<string | undefined> {
+export function createClaudeBackend(sdkOverride?: ClaudeSdkModule): AgentBackend {
+  const state: ClaudeSessionState = {
+    sessionIds: new Map(),
+    sessionOwners: new Map()
+  };
+  let sdkPromise: Promise<ClaudeSdkModule> | undefined;
+
+  async function getSdk(): Promise<ClaudeSdkModule> {
+    sdkPromise ??= sdkOverride ? Promise.resolve(sdkOverride) : loadClaudeSdk();
+    return sdkPromise;
+  }
+
+  return {
+    name: "claude",
+    async runAgent(params: AgentRunParams) {
+      return runClaudeAgent({ ...params, sdk: sdkOverride ?? (await getSdk()) }, state);
+    }
+  };
+}
+
+export const claudeBackend: AgentBackend = createClaudeBackend();
+
+async function runClaudeAgent(params: ClaudeAgentRunParams, state: ClaudeSessionState): Promise<string | undefined> {
   const sdk = params.sdk ?? (await loadClaudeSdk());
   const abortController = new AbortController();
   const timeoutMs = params.timeoutMs ?? params.roles.runtime.timeoutMs;
   const timeout = setTimeout(() => abortController.abort(), timeoutMs);
+  const role = params.roles[params.agent];
+  const agentName = toAgentName(params.agent);
 
   try {
-    const askHumanTool = sdk.tool(
-      "ask_human",
-      "Ask the human for judgment or missing context. Use only when progress needs human input.",
-      { question: z.string().min(1) },
-      async (args) => {
-        const question = String(args.question ?? "");
-        if (!question.trim()) {
-          return {
-            content: [{ type: "text", text: "question is required" }],
-            isError: true
-          };
-        }
-
-        const answer = await params.askHuman(question);
-        return {
-          content: [{ type: "text", text: answer }],
-          structuredContent: { answer }
-        };
-      },
-      {
-        annotations: {
-          readOnlyHint: false,
-          destructiveHint: false,
-          openWorldHint: false
-        },
-        alwaysLoad: true
-      }
-    );
-
-    const masplTools = sdk.createSdkMcpServer({
-      name: "maspl",
-      version: "0.1.0",
-      tools: [askHumanTool]
-    });
-
-    const allowedTools = ensureAllowedTools(params.roles.runtime.allowedTools);
     const options = {
       cwd: params.workspace,
       maxTurns: params.maxTurns ?? params.roles.runtime.maxTurns,
       abortController,
-      model: params.roles.main.model,
-      permissionMode: params.roles.main.permissionMode ?? "acceptEdits",
-      allowedTools,
+      model: normalizeClaudeModel(role.model),
+      permissionMode: role.permissionMode ?? (params.agent === "exec" ? "acceptEdits" : "plan"),
+      allowedTools: allowedToolsForAgent(params),
       disallowedTools: params.roles.runtime.disallowedTools,
-      mcpServers: {
-        maspl: masplTools
-      },
       systemPrompt: {
         type: "preset",
         preset: "claude_code",
-        append: params.roles.main.prompt
+        append: role.prompt
       },
-      agents: {
-        reviewer: {
-          description: params.roles.reviewer.description,
-          prompt: params.roles.reviewer.prompt,
-          tools: params.roles.reviewer.tools ?? ["Read", "Grep", "Glob"],
-          model: params.roles.reviewer.model,
-          maxTurns: params.roles.reviewer.maxTurns,
-          permissionMode: params.roles.reviewer.permissionMode ?? "plan"
-        }
-      }
+      resume: state.sessionIds.get(params.agent)
     };
 
-    await params.log.appendEvent("Claude Options", {
+    await params.log.appendEvent("Claude Agent Options", {
+      agent: params.agent,
       cwd: options.cwd,
       maxTurns: options.maxTurns,
       model: options.model,
       permissionMode: options.permissionMode,
-      allowedTools,
-      reviewer: {
-        description: params.roles.reviewer.description,
-        tools: options.agents.reviewer.tools,
-        model: options.agents.reviewer.model,
-        permissionMode: options.agents.reviewer.permissionMode
-      }
+      allowedTools: options.allowedTools,
+      resume: options.resume
+    });
+
+    const initialSession = await params.log.registerAgentSession({
+      agent: params.agent,
+      backend: "claude",
+      sessionId: options.resume
+    });
+    await params.log.appendEvent("Claude Agent Session", {
+      agent: params.agent,
+      sessionId: options.resume,
+      agentSessionId: initialSession.sessionId,
+      source: initialSession.source
     });
 
     let finalResult: string | undefined;
     for await (const message of sdk.query({
-      prompt: buildInitialPrompt(params.goal, params.workspace),
+      prompt: buildPrompt(params),
       options
     })) {
+      await captureSessionId(params, state, message);
+      await appendClaudeTrace(params, message, agentName);
       await params.log.appendEvent("SDK Message", summarizeSdkMessage(message));
       const maybeResult = extractResult(message);
       if (maybeResult) {
@@ -120,14 +93,14 @@ export async function runClaudeSession(params: ClaudeRunParams): Promise<string 
       }
     }
 
-    if (finalResult) {
-      await params.log.appendSection("Final Result", finalResult);
-    }
-
     return finalResult;
   } catch (error) {
-    await params.log.appendEvent("Error", {
-      message: error instanceof Error ? error.message : String(error)
+    await params.log.appendTrace({
+      agent: agentName,
+      phase: "error",
+      status: "failed",
+      summary: `${agentName} failed in Claude backend.`,
+      output: error instanceof Error ? error.message : String(error)
     });
     throw normalizeClaudeError(error);
   } finally {
@@ -135,30 +108,111 @@ export async function runClaudeSession(params: ClaudeRunParams): Promise<string 
   }
 }
 
-function buildInitialPrompt(goal: string, workspace: string): string {
+async function captureSessionId(
+  params: ClaudeAgentRunParams,
+  state: ClaudeSessionState,
+  message: unknown
+): Promise<void> {
+  if (!isRecord(message)) return;
+  const sessionId = message.session_id;
+  if (typeof sessionId === "string" && sessionId) {
+    assertUniqueAgentSession(state.sessionOwners, sessionId, params.agent);
+    state.sessionIds.set(params.agent, sessionId);
+    await params.log.registerAgentSession({
+      agent: params.agent,
+      backend: "claude",
+      sessionId
+    });
+  }
+}
+
+function assertUniqueAgentSession(
+  owners: Map<string, AgentRunParams["agent"]>,
+  sessionId: string,
+  agent: AgentRunParams["agent"]
+): void {
+  const owner = owners.get(sessionId);
+  if (owner && owner !== agent) {
+    throw new Error(`Claude session id ${sessionId} is already owned by ${owner}; ${agent} cannot reuse it.`);
+  }
+  owners.set(sessionId, agent);
+}
+
+function buildPrompt(params: ClaudeAgentRunParams): string {
   return `Goal:
-${goal}
+${params.goal}
 
 Workspace:
-${workspace}
+${params.workspace}
 
-Operate AI-natively. Decide your own sequence of inspect, edit, command execution,
-reviewer delegation, human question, iteration, and final delivery. The reviewer
-subagent is named "reviewer"; use it when independent critique would help.`;
+Task:
+${params.task}`;
 }
 
-function ensureAllowedTools(tools: string[]): string[] {
-  const unique = new Set(tools);
-  unique.add("Agent");
-  unique.add("mcp__maspl__ask_human");
-  return [...unique];
-}
+async function appendClaudeTrace(params: ClaudeAgentRunParams, message: unknown, agentName: string): Promise<void> {
+  if (!isRecord(message)) {
+    await params.log.appendTrace({
+      agent: "Claude SDK",
+      phase: "progress",
+      status: "running",
+      summary: "Claude emitted a non-object message.",
+      metadata: message
+    });
+    return;
+  }
 
-function extractResult(message: unknown): string | undefined {
-  if (typeof message !== "object" || message === null) return undefined;
-  if (!("result" in message)) return undefined;
-  const result = (message as { result?: unknown }).result;
-  return typeof result === "string" ? result : undefined;
+  if (message.type === "system") {
+    await params.log.appendTrace({
+      agent: "Claude SDK",
+      phase: "progress",
+      status: "running",
+      summary: `Claude system event: ${String(message.subtype ?? "unknown")}`,
+      metadata: summarizeSdkMessage(message)
+    });
+    return;
+  }
+
+  if (message.type === "result") {
+    const isError = typeof message.subtype === "string" && message.subtype.startsWith("error");
+    await params.log.appendTrace({
+      agent: agentName,
+      phase: isError ? "error" : "output",
+      status: isError ? "failed" : "completed",
+      summary: isError ? "Claude result reported an error." : "Claude result received.",
+      output: message.result,
+      metadata: summarizeSdkMessage(message)
+    });
+    return;
+  }
+
+  const nested = isRecord(message.message) ? message.message : undefined;
+  if (!nested) {
+    await params.log.appendTrace({
+      agent: "Claude SDK",
+      phase: "progress",
+      status: "running",
+      summary: `Claude message: ${String(message.type ?? "unknown")}`,
+      metadata: summarizeSdkMessage(message)
+    });
+    return;
+  }
+
+  const content = Array.isArray(nested.content) ? nested.content : [];
+  const text = extractTextContent(content);
+  if (text) {
+    await params.log.appendTrace({
+      agent: agentName,
+      phase: nested.role === "assistant" ? "output" : "input",
+      status: "running",
+      summary: `${agentName} ${nested.role === "assistant" ? "produced output" : "received input"}.`,
+      input: nested.role === "assistant" ? undefined : text,
+      output: nested.role === "assistant" ? text : undefined,
+      metadata: {
+        messageId: nested.id,
+        stopReason: nested.stop_reason
+      }
+    });
+  }
 }
 
 function summarizeSdkMessage(message: unknown): unknown {
@@ -186,9 +240,67 @@ function summarizeNestedMessage(value: unknown): unknown {
   };
 }
 
+function extractTextContent(content: unknown[]): string {
+  return content
+    .map((block) => {
+      if (!isRecord(block) || block.type !== "text") return "";
+      return typeof block.text === "string" ? block.text : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function extractResult(message: unknown): string | undefined {
+  if (typeof message !== "object" || message === null) return undefined;
+  if (!("result" in message)) return undefined;
+  const result = (message as { result?: unknown }).result;
+  return typeof result === "string" ? result : undefined;
+}
+
+function toAgentName(agent: ClaudeAgentRunParams["agent"]): string {
+  switch (agent) {
+    case "orchestrator":
+      return "Orchestrator Agent";
+    case "exec":
+      return "Exec Agent";
+    case "review":
+      return "Review Agent";
+    case "judge":
+      return "Judge Agent";
+  }
+}
+
+function defaultToolsForAgent(agent: ClaudeAgentRunParams["agent"]): string[] {
+  if (agent === "orchestrator") {
+    return [];
+  }
+  if (agent === "exec") {
+    return ["Read", "Grep", "Glob", "Bash", "Edit", "MultiEdit", "Write"];
+  }
+  return ["Read", "Grep", "Glob"];
+}
+
+function allowedToolsForAgent(params: ClaudeAgentRunParams): string[] {
+  const requested = roleFor(params).tools ?? defaultToolsForAgent(params.agent);
+  const runtimeAllowed = new Set(params.roles.runtime.allowedTools);
+  return requested.filter((tool) => runtimeAllowed.has(tool));
+}
+
+function roleFor(params: ClaudeAgentRunParams) {
+  return params.roles[params.agent];
+}
+
+function normalizeClaudeModel(model: string | undefined): string | undefined {
+  return model === "inherit" ? undefined : model;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function normalizeClaudeError(error: unknown): Error {
   if (error instanceof Error && error.name === "AbortError") {
-    return new Error("Claude session timed out.");
+    return new Error("Claude agent timed out.");
   }
 
   if (error instanceof Error) {

@@ -3,8 +3,7 @@ export type PermissionMode =
   | "dontAsk"
   | "acceptEdits"
   | "bypassPermissions"
-  | "plan"
-  | "auto";
+  | "plan";
 
 export type AgentRole = {
   prompt: string;
@@ -14,14 +13,16 @@ export type AgentRole = {
   permissionMode?: PermissionMode;
 };
 
-export type ReviewerRole = AgentRole & {
+export type NamedAgentRole = AgentRole & {
   description: string;
 };
 
 export type RolesConfig = {
   version: number;
-  main: AgentRole;
-  reviewer: ReviewerRole;
+  orchestrator: NamedAgentRole;
+  exec: NamedAgentRole;
+  review: NamedAgentRole;
+  judge: NamedAgentRole;
   runtime: {
     backend: BackendName;
     timeoutMs: number;
@@ -34,8 +35,9 @@ export type RolesConfig = {
 export type BackendName = "claude" | "codex";
 
 export type RunOptions = {
+  taskName: string;
   goal: string;
-  workspace: string;
+  workspaceRoot: string;
   rolesPath: string;
   backend?: BackendName;
   maxTurns?: number;
@@ -43,7 +45,11 @@ export type RunOptions = {
 };
 
 export type RunResult = {
+  taskName: string;
+  workspace: string;
   runId: string;
   logPath: string;
+  resultPath: string;
+  agentSessionsPath: string;
   result?: string;
 };

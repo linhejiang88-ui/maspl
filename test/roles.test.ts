@@ -6,18 +6,22 @@ describe("parseRolesConfig", () => {
   it("parses the default roles file", () => {
     const config = parseRolesConfig(defaultRolesYaml);
 
-    expect(config.main.prompt).toContain("Main Agent");
-    expect(config.reviewer.description).toContain("Independent code reviewer");
-    expect(config.runtime.allowedTools).toContain("Agent");
-    expect(config.runtime.allowedTools).toContain("mcp__maspl__ask_human");
+    expect(config.orchestrator.prompt).toContain("Orchestrator Agent");
+    expect(config.exec.prompt).toContain("Exec Agent");
+    expect(config.review.description).toContain("Reviews Exec Agent");
+    expect(config.judge.prompt).toContain("Judge Agent");
+    expect(config.orchestrator.tools).toEqual([]);
+    expect(config.runtime.allowedTools).toContain("Read");
+    expect(config.runtime.allowedTools).not.toContain("mcp__maspl__ask_human");
   });
 
-  it("rejects missing reviewer", () => {
+  it("rejects missing required agents", () => {
     expect(() =>
       parseRolesConfig(`
-main:
+orchestrator:
+  description: dispatch
   prompt: hello
 `)
-    ).toThrow(/reviewer/);
+    ).toThrow(/exec/);
   });
 });

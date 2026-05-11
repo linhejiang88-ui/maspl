@@ -1,14 +1,16 @@
-import { access, stat } from "node:fs/promises";
+import { access, mkdir, stat } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { getBackend } from "./backend/index.js";
 import { loadRolesConfig } from "./config/roles.js";
 import { createSessionLog } from "./logging/session-log.js";
+import { runOrchestration } from "./orchestration/loop.js";
 import { createCliAskHuman, createLoggedAskHuman } from "./tools/ask-human.js";
 import type { RunOptions, RunResult } from "./types.js";
 
 export async function runMaspl(options: RunOptions): Promise<RunResult> {
-  const workspace = path.resolve(options.workspace);
-  await assertWorkspace(workspace);
+  const { taskName, workspaceRoot, workspace } = resolveProjectWorkspace(options);
+  await ensureWorkspace(workspace);
 
   const rolesPath = path.resolve(options.rolesPath);
   await access(rolesPath);
@@ -23,11 +25,15 @@ export async function runMaspl(options: RunOptions): Promise<RunResult> {
   });
 
   await log.appendEvent("Runtime", {
+    taskName,
     backend: backendName,
+    workspaceRoot,
+    workspace,
     rolesPath
   });
 
-  const result = await backend.run({
+  const result = await runOrchestration({
+    backend,
     goal: options.goal,
     workspace,
     roles,
@@ -38,13 +44,32 @@ export async function runMaspl(options: RunOptions): Promise<RunResult> {
   });
 
   return {
+    taskName,
+    workspace,
     runId: log.runId,
     logPath: log.path,
+    resultPath: log.resultPath,
+    agentSessionsPath: log.agentSessionsPath,
     result
   };
 }
 
-async function assertWorkspace(workspace: string): Promise<void> {
+export function resolveProjectWorkspace(options: Pick<RunOptions, "taskName" | "workspaceRoot">): {
+  taskName: string;
+  workspaceRoot: string;
+  workspace: string;
+} {
+  const taskName = normalizeTaskName(options.taskName);
+  const workspaceRoot = resolvePath(options.workspaceRoot);
+  return {
+    taskName,
+    workspaceRoot,
+    workspace: path.join(workspaceRoot, taskName)
+  };
+}
+
+async function ensureWorkspace(workspace: string): Promise<void> {
+  await mkdir(workspace, { recursive: true });
   const info = await stat(workspace).catch(() => undefined);
   if (!info) {
     throw new Error(`Workspace does not exist: ${workspace}`);
@@ -52,4 +77,28 @@ async function assertWorkspace(workspace: string): Promise<void> {
   if (!info.isDirectory()) {
     throw new Error(`Workspace is not a directory: ${workspace}`);
   }
+}
+
+function normalizeTaskName(taskName: string): string {
+  const normalized = taskName.trim();
+  if (!normalized) {
+    throw new Error("task_name is required.");
+  }
+  if (normalized === "." || normalized === ".." || normalized.includes("/") || normalized.includes("\\")) {
+    throw new Error(`task_name must be a single path segment, got: ${taskName}`);
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(normalized)) {
+    throw new Error(`task_name may only contain letters, numbers, dot, underscore, and hyphen, got: ${taskName}`);
+  }
+  return normalized;
+}
+
+function resolvePath(value: string): string {
+  if (value === "~") {
+    return os.homedir();
+  }
+  if (value.startsWith("~/")) {
+    return path.join(os.homedir(), value.slice(2));
+  }
+  return path.resolve(value);
 }

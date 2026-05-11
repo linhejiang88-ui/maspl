@@ -8,8 +8,7 @@ const permissionModeSchema = z.enum([
   "dontAsk",
   "acceptEdits",
   "bypassPermissions",
-  "plan",
-  "auto"
+  "plan"
 ]);
 
 const agentRoleSchema = z.object({
@@ -22,10 +21,32 @@ const agentRoleSchema = z.object({
 
 const rolesConfigSchema = z.object({
   version: z.number().int().positive().default(1),
-  main: agentRoleSchema,
-  reviewer: agentRoleSchema.extend({
-    description: z.string().min(1, "reviewer.description is required")
-  }),
+  orchestrator: agentRoleSchema
+    .extend({
+      description: z.string().min(1, "orchestrator.description is required")
+    })
+    .optional(),
+  exec: agentRoleSchema
+    .extend({
+      description: z.string().min(1, "exec.description is required")
+    })
+    .optional(),
+  review: agentRoleSchema
+    .extend({
+      description: z.string().min(1, "review.description is required")
+    })
+    .optional(),
+  judge: agentRoleSchema
+    .extend({
+      description: z.string().min(1, "judge.description is required")
+    })
+    .optional(),
+  main: agentRoleSchema.optional(),
+  reviewer: agentRoleSchema
+    .extend({
+      description: z.string().min(1, "reviewer.description is required")
+    })
+    .optional(),
   runtime: z
     .object({
       backend: z.enum(["claude", "codex"]).default("claude"),
@@ -38,9 +59,7 @@ const rolesConfigSchema = z.object({
         "Bash",
         "Edit",
         "MultiEdit",
-        "Write",
-        "Agent",
-        "mcp__maspl__ask_human"
+        "Write"
       ]),
       disallowedTools: z.array(z.string().min(1)).default([])
     })
@@ -55,9 +74,7 @@ const rolesConfigSchema = z.object({
         "Bash",
         "Edit",
         "MultiEdit",
-        "Write",
-        "Agent",
-        "mcp__maspl__ask_human"
+        "Write"
       ],
       disallowedTools: []
     })
@@ -84,7 +101,68 @@ export function parseRolesConfig(raw: string, source = "agentroles.yaml"): Roles
     throw new Error(`Invalid ${source}: ${issues}`);
   }
 
-  return result.data;
+  return normalizeRolesConfig(result.data, source);
+}
+
+type ParsedRolesConfig = z.infer<typeof rolesConfigSchema>;
+
+function normalizeRolesConfig(config: ParsedRolesConfig, source: string): RolesConfig {
+  const orchestrator =
+    config.orchestrator ??
+    (config.main
+      ? {
+          ...config.main,
+          description: "Dispatches work across Exec, Review, Judge, and Human."
+        }
+      : undefined);
+  const exec =
+    config.exec ??
+    (config.main
+      ? {
+          ...config.main,
+          description: "Executes the assigned task and produces artifacts."
+        }
+      : undefined);
+  const review =
+    config.review ??
+    (config.reviewer
+      ? {
+          ...config.reviewer,
+          description: config.reviewer.description
+        }
+      : undefined);
+  const judge =
+    config.judge ??
+    (config.reviewer
+      ? {
+          ...config.reviewer,
+          description: "Judges whether Exec output satisfies the goal given Review feedback.",
+          prompt:
+            "You are the Judge Agent. Compare the goal, Exec output, and Review feedback. Decide SATISFIED, NOT_SATISFIED, or NEED_HUMAN. Explain the reason and send the instruction back to Orchestrator."
+        }
+      : undefined);
+
+  const missing = [
+    ["orchestrator", orchestrator],
+    ["exec", exec],
+    ["review", review],
+    ["judge", judge]
+  ]
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
+
+  if (missing.length > 0) {
+    throw new Error(`Invalid ${source}: missing required agents: ${missing.join(", ")}`);
+  }
+
+  return {
+    version: config.version,
+    orchestrator: orchestrator!,
+    exec: exec!,
+    review: review!,
+    judge: judge!,
+    runtime: config.runtime
+  };
 }
 
 function formatError(error: unknown): string {

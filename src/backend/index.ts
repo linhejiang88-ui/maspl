@@ -1,13 +1,13 @@
-import { claudeBackend } from "../claude/adapter.js";
-import { codexBackend } from "../codex/adapter.js";
+import { createClaudeBackend } from "../claude/adapter.js";
+import { createCodexBackend } from "../codex/adapter.js";
 import type { BackendName } from "../types.js";
 import type { AgentBackend } from "./types.js";
 
-const backends: Record<BackendName, AgentBackend> = {
-  claude: claudeBackend,
-  codex: codexBackend
+const backendFactories: Record<BackendName, () => AgentBackend> = {
+  claude: createClaudeBackend,
+  codex: createCodexBackend
 };
 
 export function getBackend(name: BackendName): AgentBackend {
-  return backends[name];
+  return backendFactories[name]();
 }

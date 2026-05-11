@@ -27,14 +27,16 @@ program
 program
   .command("run")
   .description("Run one AI Native self-play session")
-  .requiredOption("-g, --goal <goal>", "goal for the Main Agent")
-  .option("-w, --workspace <path>", "workspace path", ".")
+  .requiredOption("-t, --task-name <task_name>", "unique task name; project workspace is <workspace-root>/<task_name>")
+  .requiredOption("-g, --goal <goal>", "goal for the Orchestrator Agent")
+  .option("-w, --workspace <path>", "workspace root path", "~/.maspl/project")
   .option("-r, --roles <path>", "agentroles.yaml path", "agentroles.yaml")
   .option("-b, --backend <backend>", "backend: claude or codex", parseBackend)
   .option("--max-turns <number>", "override runtime max turns", parsePositiveInt)
   .option("--timeout-ms <number>", "override runtime timeout in milliseconds", parsePositiveInt)
   .action(
     async (options: {
+      taskName: string;
       goal: string;
       workspace: string;
       roles: string;
@@ -43,8 +45,9 @@ program
       timeoutMs?: number;
     }) => {
       const result = await runMaspl({
+        taskName: options.taskName,
         goal: options.goal,
-        workspace: options.workspace,
+        workspaceRoot: options.workspace,
         rolesPath: options.roles,
         backend: options.backend,
         maxTurns: options.maxTurns,
@@ -52,7 +55,11 @@ program
       });
 
       console.log(`Run ${result.runId} finished.`);
+      console.log(`Task name: ${result.taskName}`);
+      console.log(`Workspace: ${result.workspace}`);
       console.log(`Session log: ${result.logPath}`);
+      console.log(`Agent sessions: ${result.agentSessionsPath}`);
+      console.log(`Result artifact: ${result.resultPath}`);
       if (result.result) {
         console.log("\nFinal result:\n");
         console.log(result.result);

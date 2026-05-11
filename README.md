@@ -1,17 +1,22 @@
 # MASPL
 
-MASPL is a local AI Native self-play CLI for coding tasks. It lets one main agent drive the loop end to end: inspect the workspace, edit files, run commands, ask for human input when needed, call review capability when supported, iterate, and finish with a summary.
+MASPL is a local multi-agent self-play CLI for coding tasks. It runs four explicit agents:
 
-The MVP intentionally avoids a fixed `exec -> review -> judge` workflow. Runtime code only handles CLI input, backend setup, budgets, tool plumbing, and session logging.
+- `Orchestrator Agent`: receives the user goal and all agent outputs, then decides which agent runs next and what task it should execute.
+- `Exec Agent`: plans and performs concrete workspace changes.
+- `Review Agent`: reviews Exec output and raises risks or objections.
+- `Judge Agent`: decides whether the result is `SATISFIED`, `NOT_SATISFIED`, or `NEED_HUMAN`.
 
-## Status
+Claude and Codex are backend adapters only. They run the selected agent task; they do not own the orchestration logic.
 
-- Language: TypeScript
-- Package manager: pnpm
-- Default backend: Claude Agent SDK
-- Optional backend: Codex SDK
-- CLI commands: `maspl init-roles`, `maspl run`
-- Session logs: `<workspace>/.maspl/runs/<run-id>/session.md`
+## Requirements
+
+- Node.js 22+
+- pnpm
+- Local Claude Code CLI installed, logged in, and available on `PATH` when using `--backend claude`
+- Local Codex CLI installed, logged in, and available on `PATH` when using `--backend codex`
+
+MASPL reuses the local CLI auth/session environment through the Claude Agent SDK and Codex SDK. Install and verify those CLIs before running MASPL.
 
 ## Install
 
@@ -20,41 +25,17 @@ pnpm install
 pnpm run build
 ```
 
-This repo includes `.npmrc` pointing at `https://registry.npmmirror.com` for faster installs in China.
+The repo includes `.npmrc` with the npmmirror registry for faster dependency installs in China.
 
 ## Configure Roles
 
-Create a default `agentroles.yaml`:
+Create a default roles file:
 
 ```bash
 node dist/cli.js init-roles
 ```
 
-The roles file defines:
-
-- `main`: the main agent prompt and permissions.
-- `reviewer`: the reviewer subagent prompt.
-- `runtime`: backend, timeout, max turns, and tool allow/deny lists.
-
-Example runtime block:
-
-```yaml
-runtime:
-  backend: claude
-  maxTurns: 30
-  timeoutMs: 1800000
-  allowedTools:
-    - Read
-    - Grep
-    - Glob
-    - Bash
-    - Edit
-    - MultiEdit
-    - Write
-    - Agent
-    - mcp__maspl__ask_human
-  disallowedTools: []
-```
+This creates `agentroles.yaml` with prompts, permissions, tool scopes, runtime budget, and backend defaults for the four agents.
 
 ## Run
 
@@ -62,8 +43,8 @@ Claude backend:
 
 ```bash
 node dist/cli.js run \
+  --task-name fix-tests-demo \
   --goal "Fix the failing tests and explain what changed" \
-  --workspace /path/to/project \
   --roles agentroles.yaml \
   --backend claude
 ```
@@ -72,8 +53,8 @@ Codex backend:
 
 ```bash
 node dist/cli.js run \
+  --task-name fix-tests-demo \
   --goal "Fix the failing tests and explain what changed" \
-  --workspace /path/to/project \
   --roles agentroles.yaml \
   --backend codex
 ```
@@ -81,75 +62,66 @@ node dist/cli.js run \
 Useful options:
 
 ```bash
+--workspace ~/.maspl/project
 --max-turns 30
 --timeout-ms 1800000
 ```
 
-## Backend Behavior
+`--task-name` is required and must be a single path segment. By default, MASPL runs inside:
 
-### Claude
+```text
+~/.maspl/project/<task_name>/
+```
 
-Claude is the full MVP path:
+If `--workspace <root>` is provided, MASPL runs inside:
 
-- Registers `reviewer` as a Claude Agent SDK subagent.
-- Registers `ask_human(question)` as an in-process MCP tool.
-- Uses Claude SDK permissions such as `permissionMode`, allowed tools, and disallowed tools.
-- Streams SDK messages into the session log.
+```text
+<root>/<task_name>/
+```
 
-### Codex
+## Multi-Agent Flow
 
-Codex is implemented as a basic backend using `@openai/codex-sdk`:
+```mermaid
+flowchart TD
+  User["User Goal"] --> Orchestrator["Orchestrator Agent"]
+  Orchestrator -->|"NEXT_AGENT: exec\nTASK: implement"| Exec["Exec Agent"]
+  Exec -->|"result, changed files, verification"| Orchestrator
+  Orchestrator -->|"NEXT_AGENT: review\nTASK: review Exec output"| Review["Review Agent"]
+  Review -->|"findings, risks, objections"| Orchestrator
+  Orchestrator -->|"NEXT_AGENT: judge\nTASK: decide satisfaction"| Judge["Judge Agent"]
+  Judge -->|"SATISFIED / NOT_SATISFIED / NEED_HUMAN"| Orchestrator
+  Orchestrator -->|"NEXT_AGENT: human"| Human["Human"]
+  Human -->|"answer"| Orchestrator
+  Orchestrator -->|"NEXT_AGENT: done"| Result["Result Artifact"]
+```
 
-- Starts a local Codex thread with `startThread().runStreamed()`.
-- Configures workspace, sandbox, approval policy, and model.
-- Writes streamed Codex events into the session log.
-- Sets `skipGitRepoCheck: true` so temporary or non-git workspaces can run.
+The Runtime only parses Orchestrator dispatch:
 
-Current Codex SDK public types do not expose native subagent registration or in-process tool registration in the same shape as Claude Agent SDK. MASPL therefore does not fake a reviewer tool or `ask_human` tool for Codex; it injects the reviewer prompt as review discipline in the main prompt and asks the agent to stop with a user question when blocked.
+```text
+NEXT_AGENT: exec | review | judge | human | done
+TASK:
+<task for the selected agent>
+```
 
-## Logs
+Invalid dispatch is retried once. If it is still invalid, the run fails instead of silently treating the task as complete.
 
-Each run creates:
+## Output
+
+Each run writes artifacts inside the task workspace:
 
 ```text
 <workspace>/.maspl/runs/<run-id>/session.md
+<workspace>/.maspl/runs/<run-id>/agent-sessions.json
+<workspace>/.maspl/runs/<run-id>/result.md
 ```
 
-The log contains:
+`result.md` is the final delivery artifact. It should explain what was produced, where it lives in the workspace, and how to use or verify it.
 
-- goal
-- selected backend
-- backend options
-- streamed SDK events
-- human Q&A when `ask_human` is used
-- final result or error
+`agent-sessions.json` records the per-agent backend session ids for the run. Different agents cannot share the same session id.
 
-## Development
+## Notes
 
-```bash
-pnpm run typecheck
-pnpm test
-pnpm run build
-```
-
-Smoke test example:
-
-```bash
-node dist/cli.js run \
-  --goal "Fix the failing test, run npm test, and keep the change minimal" \
-  --workspace /private/tmp/maspl-smoke-task \
-  --roles agentroles.yaml \
-  --backend codex \
-  --max-turns 3 \
-  --timeout-ms 180000
-```
-
-## Non-Goals For MVP
-
-- No gateway integration.
-- No fixed workflow state machine.
-- No custom subagent call protocol.
-- No independent Judge agent.
-- No long-term memory or test-case management.
-- No post-hoc diff permission enforcement.
-
+- `runtime.allowedTools` is a hard allowlist. Agent role tools are intersected with it before backend execution.
+- Exec is the only role intended to modify the workspace.
+- Human-in-the-Loop uses `NEXT_AGENT: human`; no backend-specific human MCP tool is required.
+- Gateway integrations such as Feishu or Telegram are not part of the MVP.

@@ -1,18 +1,20 @@
 import type { SessionLog } from "../logging/session-log.js";
-import type { AskHuman } from "../tools/ask-human.js";
 import type { RolesConfig } from "../types.js";
 
-export type AgentBackendRunParams = {
+export type AgentRoleName = "orchestrator" | "exec" | "review" | "judge";
+
+export type AgentRunParams = {
+  agent: AgentRoleName;
+  task: string;
   goal: string;
   workspace: string;
   roles: RolesConfig;
   log: SessionLog;
-  askHuman: AskHuman;
   maxTurns?: number;
   timeoutMs?: number;
 };
 
 export type AgentBackend = {
   name: string;
-  run(params: AgentBackendRunParams): Promise<string | undefined>;
+  runAgent(params: AgentRunParams): Promise<string | undefined>;
 };
