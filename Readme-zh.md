@@ -25,13 +25,6 @@ MASPL 面向那些今天仍主要靠人工串联的优化循环：
 2. 极简 Agent 管理框架：复用本地 Codex 和 Claude Code 的 CLI/SDK 能力，避免重复实现 bot、coding agent 等能力。
 3. Human-in-the-Loop：AI 可以自动干活，但关键节点必须由人确认、审批、纠错；AI 负责执行、辅助和推荐，人掌握最终决策权。
 
-## 核心依赖
-
-MASPL 依赖本地 command line 工具和对应 SDK，复用本地环境、认证、workspace 和权限，不维护远程 agent runtime。
-
-- Codex 通过本地 Codex CLI 和 [Codex SDK](https://github.com/openai/codex/tree/main/sdk) 接入。
-- Claude 通过本地 Claude Code CLI 和 Claude Agent SDK 接入。
-
 ## 环境要求
 
 - Node.js 22+
@@ -39,10 +32,10 @@ MASPL 依赖本地 command line 工具和对应 SDK，复用本地环境、认�
 
 ## Backend Behavior
 
-Backend 只是本地执行 adapter。使用某个 backend 前，需要安装对应本地 CLI，配置好 LLM API/auth，并确认该 CLI 可以独立执行成功。
+Backend 只是本地执行 adapter。MASPL 复用本地 CLI 环境、认证、workspace 和权限，不维护远程 agent runtime。
 
-- `--backend claude`：要求本地 Claude Code CLI 已安装、已认证、已配置可用的 LLM API，并且在 `PATH` 中可用。
-- `--backend codex`：要求本地 Codex CLI 已安装、已认证、已配置可用的 LLM API，并且在 `PATH` 中可用。
+- `--backend claude`：要求本地 Claude Code CLI 已安装、已认证、已配置可用的 LLM API、在 `PATH` 中可用，并且可以独立执行成功。
+- `--backend codex`：要求本地 Codex CLI 已安装、已认证、已配置可用的 LLM API、在 `PATH` 中可用，并且可以独立执行成功。Codex 通过 [Codex SDK](https://github.com/openai/codex/tree/main/sdk) 接入。
 
 ## 安装
 
@@ -50,8 +43,6 @@ Backend 只是本地执行 adapter。使用某个 backend 前，需要安装对�
 pnpm install
 pnpm run build
 ```
-
-仓库内置 `.npmrc`，使用 npmmirror registry 以加速国内依赖安装。
 
 ## 配置角色
 

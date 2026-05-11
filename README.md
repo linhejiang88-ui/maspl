@@ -25,13 +25,6 @@ The goal is to let agents drive execution, review, judgment, and human interacti
 2. Minimal agent management: reuse local Codex and Claude Code capabilities through CLI/SDK integration instead of rebuilding bots or coding agents.
 3. Human-in-the-Loop: agents can work automatically, but key uncertainty, approval, and correction points must go back to the human.
 
-## Core Dependencies
-
-MASPL depends on local command-line tools and their SDKs. It reuses the local environment, authentication, workspace, and permissions instead of managing a remote agent runtime.
-
-- Codex is integrated through the local Codex CLI and the [Codex SDK](https://github.com/openai/codex/tree/main/sdk).
-- Claude is integrated through the local Claude Code CLI and Claude Agent SDK.
-
 ## Requirements
 
 - Node.js 22+
@@ -39,10 +32,10 @@ MASPL depends on local command-line tools and their SDKs. It reuses the local en
 
 ## Backend Behavior
 
-Backends are local execution adapters. To use a backend, install its local CLI, configure the required LLM API/auth, and verify that the CLI can execute successfully before running MASPL.
+Backends are local execution adapters. MASPL reuses the local CLI environment, authentication, workspace, and permissions instead of managing a remote agent runtime.
 
-- `--backend claude`: requires local Claude Code CLI installed, authenticated, configured with a working LLM API, and available on `PATH`.
-- `--backend codex`: requires local Codex CLI installed, authenticated, configured with a working LLM API, and available on `PATH`.
+- `--backend claude`: requires local Claude Code CLI installed, authenticated, configured with a working LLM API, available on `PATH`, and able to execute successfully.
+- `--backend codex`: requires local Codex CLI installed, authenticated, configured with a working LLM API, available on `PATH`, and able to execute successfully. Codex is integrated through the [Codex SDK](https://github.com/openai/codex/tree/main/sdk).
 
 ## Install
 
@@ -50,8 +43,6 @@ Backends are local execution adapters. To use a backend, install its local CLI, 
 pnpm install
 pnpm run build
 ```
-
-The repo includes `.npmrc` with the npmmirror registry for faster dependency installs in China.
 
 ## Configure Roles
 
