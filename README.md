@@ -1,4 +1,4 @@
-# MASPL
+# Multi-Agent Self-Play-Loop driven AI-Native workflow
 
 MASPL is a local multi-agent self-play CLI for coding tasks. It runs four explicit agents:
 
@@ -9,14 +9,40 @@ MASPL is a local multi-agent self-play CLI for coding tasks. It runs four explic
 
 Claude and Codex are backend adapters only. They run the selected agent task; they do not own the orchestration logic.
 
+## Use Cases
+
+MASPL is for optimization loops that are still mostly stitched together by humans today:
+
+1. Coding workflow: write or modify code with Claude Code, review with Codex, iterate until the result is acceptable.
+2. Prompt iteration workflow: analyze documents, write prompts, run test cases, optimize prompts, and repeat until the prompt meets the target.
+3. Algorithm engineering workflow: search for better CTR-model hyperparameters or feature processing strategies, run experiments, evaluate AUC/F1, and repeat.
+
+The goal is to let agents drive execution, review, judgment, and human interaction, while humans keep final approval and correction authority.
+
+## Principles
+
+1. Agent-first: MASPL is designed with agents as the core decision and execution layer, not as AI bolted onto a traditional workflow.
+2. Minimal agent management: reuse local Codex and Claude Code capabilities through CLI/SDK integration instead of rebuilding bots or coding agents.
+3. Human-in-the-Loop: agents can work automatically, but key uncertainty, approval, and correction points must go back to the human.
+
+## Core Dependencies
+
+MASPL depends on local command-line tools and their SDKs. It reuses the local environment, authentication, workspace, and permissions instead of managing a remote agent runtime.
+
+- Codex is integrated through the local Codex CLI and the [Codex SDK](https://github.com/openai/codex/tree/main/sdk).
+- Claude is integrated through the local Claude Code CLI and Claude Agent SDK.
+
 ## Requirements
 
 - Node.js 22+
 - pnpm
-- Local Claude Code CLI installed, logged in, and available on `PATH` when using `--backend claude`
-- Local Codex CLI installed, logged in, and available on `PATH` when using `--backend codex`
 
-MASPL reuses the local CLI auth/session environment through the Claude Agent SDK and Codex SDK. Install and verify those CLIs before running MASPL.
+## Backend Behavior
+
+Backends are local execution adapters. To use a backend, install its local CLI, configure the required LLM API/auth, and verify that the CLI can execute successfully before running MASPL.
+
+- `--backend claude`: requires local Claude Code CLI installed, authenticated, configured with a working LLM API, and available on `PATH`.
+- `--backend codex`: requires local Codex CLI installed, authenticated, configured with a working LLM API, and available on `PATH`.
 
 ## Install
 
