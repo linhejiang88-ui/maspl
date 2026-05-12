@@ -1,17 +1,5 @@
 export type ClaudeSdkModule = {
   query: (args: { prompt: string; options?: Record<string, unknown> }) => AsyncIterable<unknown>;
-  tool: (
-    name: string,
-    description: string,
-    schema: Record<string, unknown>,
-    handler: (args: Record<string, unknown>) => Promise<unknown>,
-    extras?: Record<string, unknown>
-  ) => unknown;
-  createSdkMcpServer: (args: {
-    name: string;
-    version: string;
-    tools: unknown[];
-  }) => unknown;
 };
 
 export async function loadClaudeSdk(): Promise<ClaudeSdkModule> {

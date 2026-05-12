@@ -33,7 +33,6 @@ export type SessionLog = {
   path: string;
   resultPath: string;
   agentSessionsPath: string;
-  appendSection(title: string, body: string): Promise<void>;
   appendEvent(kind: string, value: unknown, options?: { realtime?: boolean }): Promise<void>;
   appendTrace(entry: AgentTraceEntry): Promise<void>;
   registerAgentSession(params: {
@@ -83,11 +82,6 @@ Agent flow is recorded in chronological order. Long input/output values are comp
     path: logPath,
     resultPath,
     agentSessionsPath,
-    appendSection: async (title, body) => {
-      const content = `\n## ${title}\n${body.trim()}\n`;
-      await appendFile(logPath, content, "utf8");
-      printRealtime(`[${new Date().toISOString()}]-[Runtime]-[section]-[${title}]`);
-    },
     appendEvent: async (kind, value, options) => {
       const content = stringifyForLog(value);
       await appendFile(

@@ -315,9 +315,7 @@ describe("backend agent sessions", () => {
           session_id: sessionId,
           result: `ok:${sessionId}`
         };
-      },
-      tool: () => ({}),
-      createSdkMcpServer: () => ({})
+      }
     };
 
     const backend = createClaudeBackend(sdk);
@@ -351,9 +349,7 @@ describe("backend agent sessions", () => {
           session_id: "allowlist-session",
           result: "ok"
         };
-      },
-      tool: () => ({}),
-      createSdkMcpServer: () => ({})
+      }
     };
 
     const backend = createClaudeBackend(sdk);
@@ -381,9 +377,7 @@ describe("backend agent sessions", () => {
           session_id: "plan-session",
           result: "plan"
         };
-      },
-      tool: () => ({}),
-      createSdkMcpServer: () => ({})
+      }
     };
 
     const backend = createClaudeBackend(sdk);
@@ -411,9 +405,7 @@ describe("backend agent sessions", () => {
           session_id: "execute-session",
           result: "implemented"
         };
-      },
-      tool: () => ({}),
-      createSdkMcpServer: () => ({})
+      }
     };
 
     const backend = createClaudeBackend(sdk);
@@ -441,9 +433,7 @@ describe("backend agent sessions", () => {
           subtype: "success",
           result: "ok"
         };
-      },
-      tool: () => ({}),
-      createSdkMcpServer: () => ({})
+      }
     };
 
     const backend = createClaudeBackend(sdk);
@@ -469,9 +459,7 @@ describe("backend agent sessions", () => {
           session_id: "shared-session",
           result: "ok"
         };
-      },
-      tool: () => ({}),
-      createSdkMcpServer: () => ({})
+      }
     };
 
     const backend = createClaudeBackend(sdk);

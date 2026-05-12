@@ -18,7 +18,6 @@ describe("createSessionLog", () => {
       runId: "test-run"
     });
 
-    await log.appendSection("Final Result", "done");
     await log.appendEvent("SDK Message", { type: "result" });
     const generatedSession = await log.registerAgentSession({
       agent: "exec",
@@ -44,7 +43,6 @@ describe("createSessionLog", () => {
     const content = await readFile(log.path, "utf8");
     expect(content).toContain("# MASPL Session test-run");
     expect(content).toContain("ship it");
-    expect(content).toContain("Final Result");
     expect(content).toContain("Agent Session Registered");
     expect(content).toContain("Result Artifact");
     expect(content).toContain('"type": "result"');
