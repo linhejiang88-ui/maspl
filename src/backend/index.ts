@@ -11,3 +11,10 @@ const backendFactories: Record<BackendName, () => AgentBackend> = {
 export function getBackend(name: BackendName): AgentBackend {
   return backendFactories[name]();
 }
+
+export function getBackends(): Record<BackendName, AgentBackend> {
+  return {
+    claude: getBackend("claude"),
+    codex: getBackend("codex")
+  };
+}

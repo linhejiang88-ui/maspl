@@ -1,6 +1,6 @@
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSessionLog } from "../src/logging/session-log.js";
 
 const workspace = path.join("/private/tmp", `maspl-test-${process.pid}`);
@@ -51,11 +51,7 @@ describe("createSessionLog", () => {
     expect(content).toContain("Orchestrator Agent handoff");
     expect(content).toContain("Orchestrator Agent -> Review Agent");
     expect(content).toContain("- [");
-    expect(content).toContain("]-[Orchestrator Agent]-[input]-[head-");
-    expect(content).toContain("-tail]");
-    expect(content).toContain("]-[Orchestrator Agent]-[output]-[review done");
     expect(content).toContain("]-[Orchestrator Agent]-[handoff]-[Orchestrator Agent -> Review Agent]");
-    expect(content).toContain("]-[Orchestrator Agent]-[handoff]-[end]");
     expect(content).toContain("[compressed: omitted");
     expect(content).toContain("````");
 
@@ -74,5 +70,84 @@ describe("createSessionLog", () => {
     expect(agentSessions.agents.exec.source).toBe("generated");
     expect(agentSessions.agents.review.sessionId).toBe(backendSession.sessionId);
     expect(agentSessions.agents.review.source).toBe("backend");
+  });
+
+  it("prints backend session ids once and suppresses generated placeholders", async () => {
+    await mkdir(workspace, { recursive: true });
+    const log = await createSessionLog({
+      workspace,
+      goal: "session logging",
+      runId: "session-print-test"
+    });
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    let sessionLines: string[] = [];
+
+    try {
+      await log.registerAgentSession({
+        agent: "review",
+        backend: "claude"
+      });
+      await log.registerAgentSession({
+        agent: "review",
+        backend: "claude",
+        sessionId: "real-review-session"
+      });
+      await log.registerAgentSession({
+        agent: "review",
+        backend: "claude",
+        sessionId: "real-review-session"
+      });
+      sessionLines = consoleLog.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes("]-[Review Agent]-[session]-["));
+    } finally {
+      consoleLog.mockRestore();
+    }
+
+    expect(sessionLines).toEqual([expect.stringContaining("real-review-session")]);
+    expect(sessionLines[0]).not.toContain("maspl-session-print-test-review");
+  });
+
+  it("suppresses noisy SDK lifecycle progress in realtime output", async () => {
+    await mkdir(workspace, { recursive: true });
+    const log = await createSessionLog({
+      workspace,
+      goal: "quiet progress",
+      runId: "quiet-progress-test"
+    });
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    let lines: string[] = [];
+
+    try {
+      await log.appendTrace({
+        agent: "Exec Agent",
+        phase: "progress",
+        status: "running",
+        summary: "Codex turn started."
+      });
+      await log.appendTrace({
+        agent: "Claude SDK",
+        phase: "progress",
+        status: "running",
+        summary: "Claude system event: init"
+      });
+      await log.appendTrace({
+        agent: "Exec Agent",
+        phase: "output",
+        status: "completed",
+        summary: "Exec produced output.",
+        output: "done"
+      });
+      lines = consoleLog.mock.calls.map((call) => String(call[0]));
+    } finally {
+      consoleLog.mockRestore();
+    }
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("]-[Exec Agent]-[output]-[done]");
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("Codex turn started.");
+    expect(content).toContain("Claude system event: init");
   });
 });

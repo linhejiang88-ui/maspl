@@ -46,7 +46,7 @@ async function runClaudeAgent(params: ClaudeAgentRunParams, state: ClaudeSession
       maxTurns: params.maxTurns ?? params.roles.runtime.maxTurns,
       abortController,
       model: normalizeClaudeModel(role.model),
-      permissionMode: role.permissionMode ?? (params.agent === "exec" ? "acceptEdits" : "plan"),
+      permissionMode: permissionModeForAgent(params),
       allowedTools: allowedToolsForAgent(params),
       disallowedTools: params.roles.runtime.disallowedTools,
       systemPrompt: {
@@ -67,16 +67,10 @@ async function runClaudeAgent(params: ClaudeAgentRunParams, state: ClaudeSession
       resume: options.resume
     });
 
-    const initialSession = await params.log.registerAgentSession({
+    await params.log.registerAgentSession({
       agent: params.agent,
       backend: "claude",
       sessionId: options.resume
-    });
-    await params.log.appendEvent("Claude Agent Session", {
-      agent: params.agent,
-      sessionId: options.resume,
-      agentSessionId: initialSession.sessionId,
-      source: initialSession.source
     });
 
     let finalResult: string | undefined;
@@ -86,7 +80,6 @@ async function runClaudeAgent(params: ClaudeAgentRunParams, state: ClaudeSession
     })) {
       await captureSessionId(params, state, message);
       await appendClaudeTrace(params, message, agentName);
-      await params.log.appendEvent("SDK Message", summarizeSdkMessage(message));
       const maybeResult = extractResult(message);
       if (maybeResult) {
         finalResult = maybeResult;
@@ -281,13 +274,26 @@ function defaultToolsForAgent(agent: ClaudeAgentRunParams["agent"]): string[] {
 }
 
 function allowedToolsForAgent(params: ClaudeAgentRunParams): string[] {
-  const requested = roleFor(params).tools ?? defaultToolsForAgent(params.agent);
+  const requested = isExecPlanOnly(params)
+    ? ["Read", "Grep", "Glob", "Bash"]
+    : roleFor(params).tools ?? defaultToolsForAgent(params.agent);
   const runtimeAllowed = new Set(params.roles.runtime.allowedTools);
   return requested.filter((tool) => runtimeAllowed.has(tool));
 }
 
+function permissionModeForAgent(params: ClaudeAgentRunParams): string | undefined {
+  if (isExecPlanOnly(params)) {
+    return "plan";
+  }
+  return roleFor(params).permissionMode ?? (params.agent === "exec" ? "acceptEdits" : "plan");
+}
+
 function roleFor(params: ClaudeAgentRunParams) {
   return params.roles[params.agent];
+}
+
+function isExecPlanOnly(params: ClaudeAgentRunParams): boolean {
+  return params.agent === "exec" && /^\s*PLAN_ONLY\b/i.test(params.taskInstruction ?? params.task);
 }
 
 function normalizeClaudeModel(model: string | undefined): string | undefined {

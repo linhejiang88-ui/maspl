@@ -13,6 +13,7 @@ const permissionModeSchema = z.enum([
 
 const agentRoleSchema = z.object({
   prompt: z.string().min(1, "prompt is required"),
+  backend: z.enum(["claude", "codex"]).optional(),
   model: z.string().min(1).optional(),
   maxTurns: z.number().int().positive().optional(),
   tools: z.array(z.string().min(1)).optional(),
@@ -138,7 +139,27 @@ function normalizeRolesConfig(config: ParsedRolesConfig, source: string): RolesC
           ...config.reviewer,
           description: "Judges whether Exec output satisfies the goal given Review feedback.",
           prompt:
-            "You are the Judge Agent. Compare the goal, Exec output, and Review feedback. Decide SATISFIED, NOT_SATISFIED, or NEED_HUMAN. Explain the reason and send the instruction back to Orchestrator."
+            `You are the Judge Agent. Compare the goal, Exec output, and Review feedback. Decide exactly one:
+SATISFIED
+Reason: <non-empty reason>
+
+OR
+
+NOT_SATISFIED
+Reason: <why the goal or plan is not satisfied>
+Modification direction: <what must change and why>
+Instruction to Orchestrator: <specific next instruction>
+
+OR
+
+NEED_HUMAN
+Reason: <why human judgment is required>
+Question: <blocking question>
+Options:
+1. <option and impact>
+2. <option and impact>
+Default if blank: <default assumption>
+Instruction to Orchestrator: Ask the human before continuing.`
         }
       : undefined);
 
@@ -157,11 +178,18 @@ function normalizeRolesConfig(config: ParsedRolesConfig, source: string): RolesC
 
   return {
     version: config.version,
-    orchestrator: orchestrator!,
-    exec: exec!,
-    review: review!,
-    judge: judge!,
+    orchestrator: withDefaultBackend(orchestrator!, "codex"),
+    exec: withDefaultBackend(exec!, "codex"),
+    review: withDefaultBackend(review!, "claude"),
+    judge: withDefaultBackend(judge!, "codex"),
     runtime: config.runtime
+  };
+}
+
+function withDefaultBackend<T extends { backend?: "claude" | "codex" }>(role: T, backend: "claude" | "codex"): T {
+  return {
+    ...role,
+    backend: role.backend ?? backend
   };
 }
 

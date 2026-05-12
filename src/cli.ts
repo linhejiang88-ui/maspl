@@ -31,7 +31,7 @@ program
   .requiredOption("-g, --goal <goal>", "goal for the Orchestrator Agent")
   .option("-w, --workspace <path>", "workspace root path", "~/.maspl/project")
   .option("-r, --roles <path>", "agentroles.yaml path", "agentroles.yaml")
-  .option("-b, --backend <backend>", "backend: claude or codex", parseBackend)
+  .option("-b, --backend <backend>", "override all agent backends: claude or codex", parseBackend)
   .option("--max-turns <number>", "override runtime max turns", parsePositiveInt)
   .option("--timeout-ms <number>", "override runtime timeout in milliseconds", parsePositiveInt)
   .action(

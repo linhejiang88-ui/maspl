@@ -6,6 +6,7 @@ export type AgentRoleName = "orchestrator" | "exec" | "review" | "judge";
 export type AgentRunParams = {
   agent: AgentRoleName;
   task: string;
+  taskInstruction?: string;
   goal: string;
   workspace: string;
   roles: RolesConfig;

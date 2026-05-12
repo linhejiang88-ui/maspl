@@ -176,6 +176,130 @@ describe("backend agent sessions", () => {
     ).rejects.toThrow("maxTurns");
   });
 
+  it("runs Codex Exec PLAN_ONLY tasks in read-only sandbox", async () => {
+    const workspace = path.join("/private/tmp", `maspl-codex-plan-only-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+
+    let options: Record<string, unknown> | undefined;
+    const sdk: CodexSdkModule = {
+      Codex: class {
+        startThread(threadOptions?: Record<string, unknown>) {
+          options = threadOptions;
+          return {
+            id: "plan-thread",
+            async runStreamed() {
+              return {
+                events: asyncIterable([
+                  {
+                    type: "item.completed",
+                    item: {
+                      id: "msg",
+                      type: "agent_message",
+                      text: "plan"
+                    }
+                  }
+                ])
+              };
+            }
+          };
+        }
+      }
+    };
+
+    const backend = createCodexBackend(sdk);
+    const params = await createParams(workspace);
+
+    await backend.runAgent({ ...params, agent: "exec", task: "PLAN_ONLY: propose an implementation plan" });
+
+    expect(options?.sandboxMode).toBe("read-only");
+  });
+
+  it("does not treat prior PLAN_ONLY context as Codex plan-only mode", async () => {
+    const workspace = path.join("/private/tmp", `maspl-codex-current-task-mode-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+
+    let options: Record<string, unknown> | undefined;
+    const sdk: CodexSdkModule = {
+      Codex: class {
+        startThread(threadOptions?: Record<string, unknown>) {
+          options = threadOptions;
+          return {
+            id: "execute-thread",
+            async runStreamed() {
+              return {
+                events: asyncIterable([
+                  {
+                    type: "item.completed",
+                    item: {
+                      id: "msg",
+                      type: "agent_message",
+                      text: "implemented"
+                    }
+                  }
+                ])
+              };
+            }
+          };
+        }
+      }
+    };
+
+    const backend = createCodexBackend(sdk);
+    const params = await createParams(workspace);
+
+    await backend.runAgent({
+      ...params,
+      agent: "exec",
+      task: "Task from Orchestrator:\nEXECUTE_APPROVED_PLAN: implement.\n\nPrior output mentioned PLAN_ONLY.",
+      taskInstruction: "EXECUTE_APPROVED_PLAN: implement."
+    });
+
+    expect(options?.sandboxMode).toBe("workspace-write");
+  });
+
+  it("resumes Codex Exec thread with write sandbox after PLAN_ONLY approval", async () => {
+    const workspace = path.join("/private/tmp", `maspl-codex-plan-execute-transition-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+
+    const startedSandboxes: unknown[] = [];
+    const resumed: Array<{ id: string; sandboxMode: unknown }> = [];
+    const sdk: CodexSdkModule = {
+      Codex: class {
+        startThread(threadOptions?: Record<string, unknown>) {
+          startedSandboxes.push(threadOptions?.sandboxMode);
+          return codexThread("thread-1", "plan");
+        }
+
+        resumeThread(id: string, threadOptions?: Record<string, unknown>) {
+          resumed.push({ id, sandboxMode: threadOptions?.sandboxMode });
+          return codexThread(id, "implemented");
+        }
+      }
+    };
+
+    const backend = createCodexBackend(sdk);
+    const params = await createParams(workspace);
+
+    await backend.runAgent({
+      ...params,
+      agent: "exec",
+      task: "PLAN_ONLY: propose an implementation plan",
+      taskInstruction: "PLAN_ONLY: propose an implementation plan"
+    });
+    await backend.runAgent({
+      ...params,
+      agent: "exec",
+      task: "Task from Orchestrator:\nEXECUTE_APPROVED_PLAN: implement.\n\nPrior output mentioned PLAN_ONLY.",
+      taskInstruction: "EXECUTE_APPROVED_PLAN: implement."
+    });
+
+    expect(startedSandboxes).toEqual(["read-only"]);
+    expect(resumed).toEqual([{ id: "thread-1", sandboxMode: "workspace-write" }]);
+
+    const agentSessions = JSON.parse(await readFile(params.log.agentSessionsPath, "utf8"));
+    expect(agentSessions.agents.exec.sessionId).toBe("thread-1");
+  });
+
   it("resumes one Claude session per agent during a backend instance", async () => {
     const workspace = path.join("/private/tmp", `maspl-claude-session-${process.pid}`);
     await mkdir(workspace, { recursive: true });
@@ -239,6 +363,71 @@ describe("backend agent sessions", () => {
     await backend.runAgent({ ...params, agent: "exec", task: "exec task" });
 
     expect(allowedTools).toEqual(["Read", "Grep"]);
+  });
+
+  it("runs Claude Exec PLAN_ONLY tasks with plan permission and read-only tools", async () => {
+    const workspace = path.join("/private/tmp", `maspl-claude-plan-only-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+
+    let permissionMode: unknown;
+    let allowedTools: unknown;
+    const sdk: ClaudeSdkModule = {
+      async *query(args: { prompt: string; options?: Record<string, unknown> }) {
+        permissionMode = args.options?.permissionMode;
+        allowedTools = args.options?.allowedTools;
+        yield {
+          type: "result",
+          subtype: "success",
+          session_id: "plan-session",
+          result: "plan"
+        };
+      },
+      tool: () => ({}),
+      createSdkMcpServer: () => ({})
+    };
+
+    const backend = createClaudeBackend(sdk);
+    const params = await createParams(workspace);
+
+    await backend.runAgent({ ...params, agent: "exec", task: "PLAN_ONLY: propose an implementation plan" });
+
+    expect(permissionMode).toBe("plan");
+    expect(allowedTools).toEqual(["Read", "Grep", "Glob", "Bash"]);
+  });
+
+  it("does not treat prior PLAN_ONLY context as Claude plan-only mode", async () => {
+    const workspace = path.join("/private/tmp", `maspl-claude-current-task-mode-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+
+    let permissionMode: unknown;
+    let allowedTools: unknown;
+    const sdk: ClaudeSdkModule = {
+      async *query(args: { prompt: string; options?: Record<string, unknown> }) {
+        permissionMode = args.options?.permissionMode;
+        allowedTools = args.options?.allowedTools;
+        yield {
+          type: "result",
+          subtype: "success",
+          session_id: "execute-session",
+          result: "implemented"
+        };
+      },
+      tool: () => ({}),
+      createSdkMcpServer: () => ({})
+    };
+
+    const backend = createClaudeBackend(sdk);
+    const params = await createParams(workspace);
+
+    await backend.runAgent({
+      ...params,
+      agent: "exec",
+      task: "Task from Orchestrator:\nEXECUTE_APPROVED_PLAN: implement.\n\nPrior output mentioned PLAN_ONLY.",
+      taskInstruction: "EXECUTE_APPROVED_PLAN: implement."
+    });
+
+    expect(permissionMode).toBe("acceptEdits");
+    expect(allowedTools).toEqual(["Read", "Grep", "Glob", "Bash", "Edit", "MultiEdit", "Write"]);
   });
 
   it("generates and serializes a Claude agent session when the SDK returns no session id", async () => {
@@ -315,6 +504,26 @@ function asyncIterable<T>(items: T[]): AsyncIterable<T> {
   return {
     async *[Symbol.asyncIterator]() {
       yield* items;
+    }
+  };
+}
+
+function codexThread(id: string, text: string) {
+  return {
+    id,
+    async runStreamed() {
+      return {
+        events: asyncIterable([
+          {
+            type: "item.completed",
+            item: {
+              id: `msg-${id}`,
+              type: "agent_message",
+              text
+            }
+          }
+        ])
+      };
     }
   };
 }

@@ -13,10 +13,15 @@ type CodexThread = {
   ): Promise<{ events: AsyncIterable<unknown> }>;
 };
 
+type CodexThreadState = {
+  thread: CodexThread;
+  sandboxMode: "read-only" | "workspace-write";
+};
+
 export function createCodexBackend(sdkOverride?: CodexSdkModule): AgentBackend {
   let sdkPromise: Promise<CodexSdkModule> | undefined;
   let codex: InstanceType<CodexSdkModule["Codex"]> | undefined;
-  const threads = new Map<AgentRunParams["agent"], CodexThread>();
+  const threads = new Map<AgentRunParams["agent"], CodexThreadState>();
 
   async function getSdk(): Promise<CodexSdkModule> {
     sdkPromise ??= sdkOverride ? Promise.resolve(sdkOverride) : loadCodexSdk();
@@ -24,20 +29,26 @@ export function createCodexBackend(sdkOverride?: CodexSdkModule): AgentBackend {
   }
 
   async function getThread(params: CodexAgentRunParams): Promise<CodexThread> {
+    const sandboxMode = sandboxForAgent(params);
     const existing = threads.get(params.agent);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.sandboxMode === sandboxMode) {
+        return existing.thread;
+      }
+
+      if (existing.thread.id && codex?.resumeThread) {
+        const resumed = codex.resumeThread(existing.thread.id, threadOptionsForAgent(params, sandboxMode));
+        threads.set(params.agent, { thread: resumed, sandboxMode });
+        return resumed;
+      }
+
+      return existing.thread;
+    }
 
     const sdk = params.sdk ?? (await getSdk());
     codex ??= new sdk.Codex();
-    const thread = codex.startThread({
-      workingDirectory: params.workspace,
-      skipGitRepoCheck: true,
-      sandboxMode: sandboxForAgent(params.agent),
-      approvalPolicy: "on-request",
-      model: normalizeModel(roleFor(params).model),
-      networkAccessEnabled: false
-    });
-    threads.set(params.agent, thread);
+    const thread = codex.startThread(threadOptionsForAgent(params, sandboxMode));
+    threads.set(params.agent, { thread, sandboxMode });
     return thread;
   }
 
@@ -66,23 +77,17 @@ async function runCodexAgent(
       agent: params.agent,
       workingDirectory: params.workspace,
       skipGitRepoCheck: true,
-      sandboxMode: sandboxForAgent(params.agent),
+      sandboxMode: sandboxForAgent(params),
       approvalPolicy: "on-request",
       model: normalizeModel(roleFor(params).model),
       maxTurns
     });
 
     const thread = await getThread(params);
-    const agentSession = await params.log.registerAgentSession({
+    await params.log.registerAgentSession({
       agent: params.agent,
       backend: "codex",
       sessionId: thread.id
-    });
-    await params.log.appendEvent("Codex Agent Session", {
-      agent: params.agent,
-      threadId: thread.id,
-      agentSessionId: agentSession.sessionId,
-      source: agentSession.source
     });
 
     let finalResult: string | undefined;
@@ -93,7 +98,6 @@ async function runCodexAgent(
 
     for await (const event of result.events) {
       await appendCodexTrace(params, event, agentName);
-      await params.log.appendEvent("Codex Event", event);
       const maybeFinal = extractAgentMessage(event);
       if (maybeFinal) {
         finalResult = maybeFinal;
@@ -283,8 +287,29 @@ function effectiveMaxTurns(params: CodexAgentRunParams): number {
   return roleFor(params).maxTurns ?? params.maxTurns ?? params.roles.runtime.maxTurns;
 }
 
-function sandboxForAgent(agent: CodexAgentRunParams["agent"]): "read-only" | "workspace-write" {
-  return agent === "exec" ? "workspace-write" : "read-only";
+function threadOptionsForAgent(
+  params: CodexAgentRunParams,
+  sandboxMode: "read-only" | "workspace-write" = sandboxForAgent(params)
+): Record<string, unknown> {
+  return {
+    workingDirectory: params.workspace,
+    skipGitRepoCheck: true,
+    sandboxMode,
+    approvalPolicy: "on-request",
+    model: normalizeModel(roleFor(params).model),
+    networkAccessEnabled: false
+  };
+}
+
+function sandboxForAgent(params: Pick<CodexAgentRunParams, "agent" | "task" | "taskInstruction">): "read-only" | "workspace-write" {
+  if (isExecPlanOnly(params)) {
+    return "read-only";
+  }
+  return params.agent === "exec" ? "workspace-write" : "read-only";
+}
+
+function isExecPlanOnly(params: Pick<CodexAgentRunParams, "agent" | "task" | "taskInstruction">): boolean {
+  return params.agent === "exec" && /^\s*PLAN_ONLY\b/i.test(params.taskInstruction ?? params.task);
 }
 
 function toAgentName(agent: CodexAgentRunParams["agent"]): string {

@@ -7,6 +7,7 @@ export type PermissionMode =
 
 export type AgentRole = {
   prompt: string;
+  backend?: BackendName;
   model?: string;
   maxTurns?: number;
   tools?: string[];

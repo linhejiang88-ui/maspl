@@ -1,7 +1,7 @@
 import { access, mkdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { getBackend } from "./backend/index.js";
+import { getBackends } from "./backend/index.js";
 import { loadRolesConfig } from "./config/roles.js";
 import { createSessionLog } from "./logging/session-log.js";
 import { runOrchestration } from "./orchestration/loop.js";
@@ -17,8 +17,7 @@ export async function runMaspl(options: RunOptions): Promise<RunResult> {
 
   const roles = await loadRolesConfig(rolesPath);
   const log = await createSessionLog({ workspace, goal: options.goal });
-  const backendName = options.backend ?? roles.runtime.backend;
-  const backend = getBackend(backendName);
+  const backends = getBackends();
   const askHuman = createLoggedAskHuman({
     askHuman: createCliAskHuman(),
     log
@@ -26,14 +25,21 @@ export async function runMaspl(options: RunOptions): Promise<RunResult> {
 
   await log.appendEvent("Runtime", {
     taskName,
-    backend: backendName,
+    backendOverride: options.backend,
+    agentBackends: {
+      orchestrator: options.backend ?? roles.orchestrator.backend,
+      exec: options.backend ?? roles.exec.backend,
+      review: options.backend ?? roles.review.backend,
+      judge: options.backend ?? roles.judge.backend
+    },
     workspaceRoot,
     workspace,
     rolesPath
-  });
+  }, { realtime: true });
 
   const result = await runOrchestration({
-    backend,
+    backends,
+    backendOverride: options.backend,
     goal: options.goal,
     workspace,
     roles,

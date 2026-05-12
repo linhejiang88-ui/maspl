@@ -34,7 +34,7 @@ export type SessionLog = {
   resultPath: string;
   agentSessionsPath: string;
   appendSection(title: string, body: string): Promise<void>;
-  appendEvent(kind: string, value: unknown): Promise<void>;
+  appendEvent(kind: string, value: unknown, options?: { realtime?: boolean }): Promise<void>;
   appendTrace(entry: AgentTraceEntry): Promise<void>;
   registerAgentSession(params: {
     agent: string;
@@ -88,22 +88,34 @@ Agent flow is recorded in chronological order. Long input/output values are comp
       await appendFile(logPath, content, "utf8");
       printRealtime(`[${new Date().toISOString()}]-[Runtime]-[section]-[${title}]`);
     },
-    appendEvent: async (kind, value) => {
+    appendEvent: async (kind, value, options) => {
       const content = stringifyForLog(value);
       await appendFile(
         logPath,
         `\n## ${kind}\n${fencedBlock(content, "json")}\n`,
         "utf8"
       );
-      printRealtime(`[${new Date().toISOString()}]-[Runtime]-[event]-[${kind}]`);
+      if (options?.realtime) {
+        printRealtime(formatBracketLine(new Date().toISOString(), "Runtime", "event", kind));
+      }
     },
     appendTrace: async (entry) => {
       sequence += 1;
       const traceLines = formatBracketLines(entry);
       await appendFile(logPath, formatTraceEntry(sequence, entry, traceLines), "utf8");
-      printRealtime(traceLines.join("\n"));
+      if (shouldPrintTraceRealtime(entry, traceLines)) {
+        printRealtime(traceLines.join("\n"));
+      }
     },
     registerAgentSession: async ({ agent, backend, sessionId }) => {
+      const existing = agentSessions.get(agent);
+      const previous = existing
+        ? {
+            sessionId: existing.sessionId,
+            backend: existing.backend,
+            source: existing.source
+          }
+        : undefined;
       const record = registerAgentSession({
         runId,
         agentSessions,
@@ -112,13 +124,24 @@ Agent flow is recorded in chronological order. Long input/output values are comp
         backend,
         sessionId
       });
+      const changed =
+        !previous ||
+        previous.sessionId !== record.sessionId ||
+        previous.backend !== record.backend ||
+        previous.source !== record.source;
       await writeFile(agentSessionsPath, formatAgentSessions(runId, agentSessions), "utf8");
-      await appendFile(
-        logPath,
-        `\n## Agent Session Registered\n${fencedBlock(record, "json")}\n`,
-        "utf8"
-      );
-      printRealtime(`[${new Date().toISOString()}]-[${toAgentDisplayName(agent)}]-[session]-[${record.sessionId}]`);
+      if (changed) {
+        await appendFile(
+          logPath,
+          `\n## Agent Session Registered\n${fencedBlock(record, "json")}\n`,
+          "utf8"
+        );
+      }
+      if (changed && record.source === "backend") {
+        printRealtime(
+          formatBracketLine(new Date().toISOString(), toAgentDisplayName(agent), "session", record.sessionId)
+        );
+      }
       return record;
     },
     writeResult: async (body) => {
@@ -129,7 +152,7 @@ Agent flow is recorded in chronological order. Long input/output values are comp
       });
       await writeFile(resultPath, content, "utf8");
       await appendFile(logPath, `\n## Result Artifact\n${resultPath}\n`, "utf8");
-      printRealtime(`[${new Date().toISOString()}]-[Runtime]-[result]-[${resultPath}]`);
+      printRealtime(formatBracketLine(new Date().toISOString(), "Runtime", "result", resultPath));
     }
   };
 }
@@ -270,6 +293,12 @@ function formatBracketLines(entry: AgentTraceEntry): string[] {
   const time = new Date().toISOString();
   const lines: string[] = [];
 
+  if (entry.phase === "handoff" && (entry.fromAgent || entry.toAgent)) {
+    return [
+      formatBracketLine(time, entry.agent, "handoff", `${entry.fromAgent ?? "unknown"} -> ${entry.toAgent ?? "unknown"}`)
+    ];
+  }
+
   if (entry.status === "started") {
     lines.push(formatBracketLine(time, entry.agent, entry.phase, "start run"));
   }
@@ -305,6 +334,32 @@ function formatBracketLines(entry: AgentTraceEntry): string[] {
   }
 
   return lines;
+}
+
+function shouldPrintTraceRealtime(entry: AgentTraceEntry, traceLines: string[]): boolean {
+  if (traceLines.length === 0) {
+    return false;
+  }
+
+  if (entry.phase === "error" || entry.status === "failed") {
+    return true;
+  }
+
+  if (entry.agent.endsWith("SDK") && entry.phase === "progress") {
+    return false;
+  }
+
+  if (entry.phase === "progress" && isNoisyLifecycleSummary(entry.summary)) {
+    return false;
+  }
+
+  return true;
+}
+
+function isNoisyLifecycleSummary(summary: string): boolean {
+  return /^(Codex thread started\.|Codex turn started\.|Codex turn completed\.|Claude system event:|Claude message:|Codex emitted |Codex item update:)/.test(
+    summary
+  );
 }
 
 function formatBracketLine(time: string, agent: string, type: string, message: string): string {
@@ -365,7 +420,7 @@ function previewValue(value: unknown): string {
 }
 
 function printRealtime(message: string): void {
-  console.log(message);
+  console.log(message.startsWith("- ") ? message : `- ${message}`);
 }
 
 export function compressText(text: string, maxChars = maxInlineChars): string {

@@ -13,6 +13,16 @@ export type CodexSdkModule = {
         turnOptions?: { signal?: AbortSignal; outputSchema?: unknown }
       ): Promise<{ events: AsyncIterable<unknown> }>;
     };
+    resumeThread?(
+      id: string,
+      options?: Record<string, unknown>
+    ): {
+      id: string | null;
+      runStreamed(
+        input: string,
+        turnOptions?: { signal?: AbortSignal; outputSchema?: unknown }
+      ): Promise<{ events: AsyncIterable<unknown> }>;
+    };
   };
 };
 

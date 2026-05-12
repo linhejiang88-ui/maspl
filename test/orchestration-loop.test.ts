@@ -8,6 +8,95 @@ import { createSessionLog } from "../src/logging/session-log.js";
 import { runOrchestration } from "../src/orchestration/loop.js";
 
 describe("runOrchestration", () => {
+  it("uses per-agent backends from roles config", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-agent-backends-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-agent-backends-test" });
+    const calls: Array<{ backend: string; agent: string }> = [];
+
+    const codexBackend: AgentBackend = {
+      name: "codex",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ backend: "codex", agent: params.agent });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: review\nTASK:\nReview something.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nAll done.";
+      }
+    };
+    const claudeBackend: AgentBackend = {
+      name: "claude",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ backend: "claude", agent: params.agent });
+        return validReviewOutput();
+      }
+    };
+
+    const result = await runOrchestration({
+      backends: {
+        claude: claudeBackend,
+        codex: codexBackend
+      },
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("All done.");
+    expect(calls).toEqual([
+      { backend: "codex", agent: "orchestrator" },
+      { backend: "claude", agent: "review" },
+      { backend: "codex", agent: "orchestrator" }
+    ]);
+  });
+
+  it("allows backend option to override per-agent backend config", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-backend-override-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-backend-override-test" });
+    const calls: Array<{ backend: string; agent: string }> = [];
+
+    const codexBackend: AgentBackend = {
+      name: "codex",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ backend: "codex", agent: params.agent });
+        if (calls.length === 1) return "NEXT_AGENT: review\nTASK:\nReview something.";
+        return "NEXT_AGENT: done\nTASK:\nAll done.";
+      }
+    };
+    const claudeBackend: AgentBackend = {
+      name: "claude",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ backend: "claude", agent: params.agent });
+        return "unexpected";
+      }
+    };
+
+    const result = await runOrchestration({
+      backends: {
+        claude: claudeBackend,
+        codex: codexBackend
+      },
+      backendOverride: "codex",
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("All done.");
+    expect(calls).toEqual([
+      { backend: "codex", agent: "orchestrator" },
+      { backend: "codex", agent: "review" },
+      { backend: "codex", agent: "orchestrator" }
+    ]);
+  });
+
   it("lets Orchestrator choose each next agent and task", async () => {
     const workspace = path.join("/private/tmp", `maspl-loop-${process.pid}`);
     await mkdir(workspace, { recursive: true });
@@ -123,4 +212,680 @@ describe("runOrchestration", () => {
       })
     ).rejects.toThrow("invalid dispatch format");
   });
+
+  it("blocks EXECUTE_APPROVED_PLAN until Review and Judge pass the plan", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-plan-gate-block-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-plan-gate-block-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec") return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: implement now.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after runtime gate.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("Stopped after runtime gate.");
+    expect(calls.map((call) => call.agent)).toEqual(["orchestrator", "exec", "orchestrator", "orchestrator"]);
+    expect(calls.some((call) => call.task.includes("EXECUTE_APPROVED_PLAN") && call.agent === "exec")).toBe(false);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("Runtime blocked EXECUTE_APPROVED_PLAN");
+  });
+
+  it("injects clarification requirements into Exec PLAN_ONLY tasks", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-exec-plan-instruction-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-exec-plan-instruction-test" });
+    let execTask = "";
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        if (params.agent === "orchestrator" && !execTask) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: define a plan for an ambiguous goal.";
+        }
+        if (params.agent === "exec") {
+          execTask = params.task;
+          return "Plan ready.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nDone.";
+      }
+    };
+
+    await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(execTask).toContain("Exec PLAN_ONLY protocol");
+    expect(execTask).toContain("CLARIFICATION_BLOCKED");
+    expect(execTask).toContain("numbered options with impact");
+    expect(execTask).toContain("Default if blank");
+  });
+
+  it("allows EXECUTE_APPROVED_PLAN after Review has no blocking findings and Judge is satisfied", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-plan-gate-pass-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-plan-gate-pass-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec" && params.task.includes("PLAN_ONLY")) return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") return validReviewOutput();
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge") return "SATISFIED\nReason: plan reviewed and acceptable.";
+        if (params.agent === "orchestrator" && calls.length === 7) {
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: implement the reviewed plan.";
+        }
+        if (params.agent === "exec" && params.task.includes("EXECUTE_APPROVED_PLAN")) return "Implemented.";
+        return "NEXT_AGENT: done\nTASK:\nAll done.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("All done.");
+    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(true);
+  });
+
+  it("clears plan approval when Judge rejects the reviewed PLAN_ONLY proposal", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-plan-gate-judge-reject-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-plan-gate-judge-reject-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose initial plan.";
+        }
+        if (params.agent === "exec") return "Initial plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview initial plan.";
+        }
+        if (params.agent === "review") return validReviewOutput();
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge initial plan.";
+        }
+        if (params.agent === "judge") return "NOT_SATISFIED\nReason: validation plan must be stronger.";
+        if (params.agent === "orchestrator" && calls.length === 7) {
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: incorrectly execute rejected plan.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after rejected plan gate.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("Stopped after rejected plan gate.");
+    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(false);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("Runtime blocked EXECUTE_APPROVED_PLAN");
+  });
+
+  it("blocks EXECUTE_APPROVED_PLAN when Review gives a generic no-blocking approval", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-review-protocol-block-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-review-protocol-block-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec") return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") return "I agree. No blocking findings.";
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the incomplete review.";
+        }
+        if (params.agent === "judge") return "SATISFIED\nReason: review said no blocking findings.";
+        if (params.agent === "orchestrator" && calls.length === 7) {
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: incorrectly implement after weak review.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after review protocol gate.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("Stopped after review protocol gate.");
+    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(false);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("Review output did not satisfy the required protocol");
+    expect(content).toContain("Missing sections");
+  });
+
+  it("injects the required skeptic checklist into Review tasks", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-review-checklist-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-review-checklist-test" });
+    let reviewTask = "";
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        if (params.agent === "orchestrator" && !reviewTask) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") {
+          reviewTask = params.task;
+          return validReviewOutput();
+        }
+        return "NEXT_AGENT: done\nTASK:\nDone.";
+      }
+    };
+
+    await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(reviewTask).toContain("Review protocol for this turn");
+    expect(reviewTask).toContain("Do not merely agree with Exec");
+    expect(reviewTask).toContain("PROBLEM_FRAMING");
+    expect(reviewTask).toContain("CHALLENGE_CASES");
+    expect(reviewTask).toContain("VALIDATION_CASES");
+    expect(reviewTask).toContain("BLOCKING_FINDINGS");
+  });
+
+  it("blocks EXECUTE_APPROVED_PLAN when Review has blocking findings", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-review-blocking-findings-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-review-blocking-findings-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec") return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") return validReviewOutput("Validation command is missing.");
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge") {
+          return `SATISFIED
+Reason: incorrect, review still has blocking findings.`;
+        }
+        if (params.agent === "orchestrator" && calls.length === 7) {
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: incorrectly implement despite review findings.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after review blocking findings gate.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("Stopped after review blocking findings gate.");
+    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(false);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("BLOCKING_FINDINGS must be exactly none");
+  });
+
+  it("blocks Review approval when challenge or validation cases are placeholders", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-review-weak-cases-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-review-weak-cases-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec") return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") {
+          return `PROBLEM_FRAMING:
+Frame the problem.
+SCOPE_REDUCTION:
+Reduce the scope.
+MUST_HAVE:
+Must implement.
+NICE_TO_HAVE:
+Nice polish.
+OUT_OF_SCOPE:
+Other work.
+ASSUMPTIONS_OR_CLARIFICATIONS:
+No blocking clarification.
+CHALLENGE_CASES:
+ok
+VALIDATION_CASES:
+pass
+BLOCKING_FINDINGS: none`;
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after weak review gate.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("Stopped after weak review gate.");
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("Weak sections: CHALLENGE_CASES, VALIDATION_CASES");
+  });
+
+  it("blocks EXECUTE_APPROVED_PLAN when Judge returns SATISFIED without a reason", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-judge-protocol-block-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-judge-protocol-block-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec") return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") return validReviewOutput();
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge") return "SATISFIED";
+        if (params.agent === "orchestrator" && calls.length === 7) {
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: incorrectly implement after weak judge.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after judge protocol gate.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("Stopped after judge protocol gate.");
+    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(false);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("Judge output did not satisfy the required protocol");
+    expect(content).toContain("Missing fields: Reason");
+  });
+
+  it("reports incomplete NEED_HUMAN Judge output back to Orchestrator", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-judge-human-protocol-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-judge-human-protocol-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec") return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") return validReviewOutput();
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge") return "NEED_HUMAN\nReason: user preference decides scope.";
+        return "NEXT_AGENT: done\nTASK:\nStopped after incomplete human request.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("Stopped after incomplete human request.");
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("Judge output did not satisfy the required protocol");
+    expect(content).toContain("Missing fields: Question, Options, Default if blank, Instruction to Orchestrator");
+  });
+
+  it("reports incomplete NOT_SATISFIED Judge output back to Orchestrator", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-judge-not-satisfied-protocol-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({
+      workspace,
+      goal: "test",
+      runId: "loop-judge-not-satisfied-protocol-test"
+    });
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec") return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") return validReviewOutput();
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge") return "NOT_SATISFIED\nReason: plan lacks validation.";
+        return "NEXT_AGENT: done\nTASK:\nStopped after incomplete not satisfied judgment.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("Stopped after incomplete not satisfied judgment.");
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("Judge output did not satisfy the required protocol");
+    expect(content).toContain("Missing fields: Modification direction, Instruction to Orchestrator");
+  });
+
+  it("passes complete NEED_HUMAN Judge output through Orchestrator to askHuman", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-judge-human-positive-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-judge-human-positive-test" });
+    const questions: string[] = [];
+    let orchestratorCalls = 0;
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        if (params.agent === "orchestrator") {
+          orchestratorCalls += 1;
+        }
+        if (params.agent === "orchestrator" && orchestratorCalls === 1) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge whether user preference is needed.";
+        }
+        if (params.agent === "judge") {
+          return `NEED_HUMAN
+Reason: target audience changes the output.
+Question: Which audience should this optimize for?
+Options:
+1. Students - simpler language and examples.
+2. Teachers - more assessment detail.
+Default if blank: Students.
+Instruction to Orchestrator: Ask the human before continuing.`;
+        }
+        if (params.agent === "orchestrator" && orchestratorCalls === 2) {
+          return `NEXT_AGENT: human
+TASK:
+Question: Which audience should this optimize for?
+Options:
+1. Students - simpler language and examples.
+2. Teachers - more assessment detail.
+Default if blank: Students.`;
+        }
+        return "NEXT_AGENT: done\nTASK:\nDone.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async (question) => {
+        questions.push(question);
+        return "";
+      },
+      maxTurns: 4
+    });
+
+    expect(result).toBe("Done.");
+    expect(questions).toHaveLength(1);
+    expect(questions[0]).toContain("Students - simpler language");
+    expect(questions[0]).toContain("Default if blank");
+  });
+
+  it("hands PLAN_ONLY clarification blocks back to Orchestrator for human choice", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-clarification-block-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-clarification-block-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+    const questions: string[] = [];
+    let clarificationQuestionAsked = false;
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: clarify target scope before planning.";
+        }
+        if (params.agent === "exec") {
+          return `CLARIFICATION_BLOCKED
+Question: Which target should this plan optimize for?
+Options:
+1. web
+2. cli
+Default if blank: cli`;
+        }
+        if (
+          params.agent === "orchestrator" &&
+          params.task.includes("CLARIFICATION_BLOCKED") &&
+          !clarificationQuestionAsked
+        ) {
+          clarificationQuestionAsked = true;
+          return "NEXT_AGENT: human\nTASK:\nClarification needed. Choose:\n1. web\n2. cli\nDefault if blank: cli";
+        }
+        return "NEXT_AGENT: done\nTASK:\nClarification handled.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async (question) => {
+        questions.push(question);
+        return "cli";
+      }
+    });
+
+    expect(result).toBe("Clarification handled.");
+    expect(questions[0]).toContain("Clarification needed");
+    expect(calls.map((call) => call.agent)).toEqual(["orchestrator", "exec", "orchestrator", "orchestrator"]);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("CLARIFICATION_BLOCKED");
+    expect(content).toContain("Exec Agent -> Orchestrator Agent");
+  });
+
+  it("hands permission blocked agent failures back to Orchestrator for human confirmation", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-permission-block-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-permission-block-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+    const questions: string[] = [];
+    let permissionQuestionAsked = false;
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: write protected file.";
+        }
+        if (params.agent === "exec") {
+          throw new Error("permission denied: write protected file requires approval");
+        }
+        if (params.agent === "orchestrator" && params.task.includes("PERMISSION_BLOCKED") && !permissionQuestionAsked) {
+          permissionQuestionAsked = true;
+          return "NEXT_AGENT: human\nTASK:\nPermission blocked. Choose:\n1. approve\n2. deny\n3. modify scope";
+        }
+        return "NEXT_AGENT: done\nTASK:\nPermission handled.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async (question) => {
+        questions.push(question);
+        return "approve";
+      }
+    });
+
+    expect(result).toBe("Permission handled.");
+    expect(questions[0]).toContain("Permission blocked");
+    expect(calls.map((call) => call.agent)).toEqual(["orchestrator", "exec", "orchestrator", "orchestrator"]);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("PERMISSION_BLOCKED");
+    expect(content).toContain("returned control to Orchestrator");
+  });
 });
+
+function validReviewOutput(blockingFindings = "none"): string {
+  return `PROBLEM_FRAMING:
+The run should produce the smallest useful implementation that satisfies the goal.
+SCOPE_REDUCTION:
+Keep this slice limited to the approved plan and avoid unrelated work.
+MUST_HAVE:
+Implement the requested behavior and verify it.
+NICE_TO_HAVE:
+Additional polish can wait.
+OUT_OF_SCOPE:
+Unrelated refactors and optional integrations.
+ASSUMPTIONS_OR_CLARIFICATIONS:
+No blocking clarification needed for this test.
+CHALLENGE_CASES:
+Check an edge case that could falsify the plan.
+VALIDATION_CASES:
+Run the relevant automated or manual verification command.
+BLOCKING_FINDINGS: ${blockingFindings}`;
+}

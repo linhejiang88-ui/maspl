@@ -8,7 +8,14 @@ export function createCliAskHuman(): AskHuman {
   return async (question: string) => {
     const rl = createInterface({ input, output });
     try {
-      return await rl.question(`\n${question}\n> `);
+      const prompt = formatHumanPrompt(question);
+      const answer = await rl.question(prompt.text);
+      if (!answer.trim()) {
+        return "";
+      }
+
+      const selected = prompt.options[Number.parseInt(answer.trim(), 10) - 1];
+      return selected ?? answer;
     } finally {
       rl.close();
     }
@@ -44,4 +51,36 @@ export function createLoggedAskHuman(params: {
     });
     return answer;
   };
+}
+
+export function formatHumanPrompt(question: string): { text: string; options: string[] } {
+  const options = extractOptions(question);
+  if (options.length === 0) {
+    return {
+      text: `\n${question}\n> `,
+      options
+    };
+  }
+
+  const numbered = options.map((option, index) => `${index + 1}. ${option}`).join("\n");
+  return {
+    text: `\n${stripOptions(question)}\n\n${numbered}\n\nSelect 1-${options.length}, or press Enter to leave blank.\n> `,
+    options
+  };
+}
+
+function extractOptions(question: string): string[] {
+  const lines = question.split(/\r?\n/);
+  return lines
+    .map((line) => line.match(/^\s*(?:[-*]|\d+[.)])\s+(.+?)\s*$/)?.[1])
+    .filter((value): value is string => Boolean(value))
+    .filter((value) => value.length <= 120);
+}
+
+function stripOptions(question: string): string {
+  return question
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*(?:[-*]|\d+[.)])\s+(.+?)\s*$/.test(line))
+    .join("\n")
+    .trim();
 }

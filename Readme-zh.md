@@ -34,8 +34,10 @@ MASPL 面向那些今天仍主要靠人工串联的优化循环：
 
 Backend 只是本地执行 adapter。MASPL 复用本地 CLI 环境、认证、workspace 和权限，不维护远程 agent runtime。
 
-- `--backend claude`：要求本地 Claude Code CLI 已安装、已认证、已配置可用的 LLM API、在 `PATH` 中可用，并且可以独立执行成功。
-- `--backend codex`：要求本地 Codex CLI 已安装、已认证、已配置可用的 LLM API、在 `PATH` 中可用，并且可以独立执行成功。Codex 通过 [Codex SDK](https://github.com/openai/codex/tree/main/sdk) 接入。
+Agent backend 在 `agentroles.yaml` 中配置。默认 roles 使用 Codex 运行 Orchestrator、Exec、Judge，使用 Claude 运行 Review。传入 `--backend claude` 或 `--backend codex` 会覆盖本次运行中所有 agent 的 backend 配置。
+
+- `claude`：要求本地 Claude Code CLI 已安装、已认证、已配置可用的 LLM API、在 `PATH` 中可用，并且可以独立执行成功。
+- `codex`：要求本地 Codex CLI 已安装、已认证、已配置可用的 LLM API、在 `PATH` 中可用，并且可以独立执行成功。Codex 通过 [Codex SDK](https://github.com/openai/codex/tree/main/sdk) 接入。
 
 ## 安装
 
@@ -56,17 +58,16 @@ node dist/cli.js init-roles
 
 ## 运行
 
-Claude backend：
+使用默认 per-agent backend：
 
 ```bash
 node dist/cli.js run \
   --task-name fix-tests-demo \
   --goal "Fix the failing tests and explain what changed" \
-  --roles agentroles.yaml \
-  --backend claude
+  --roles agentroles.yaml
 ```
 
-Codex backend：
+覆盖所有 agent 使用同一个 backend：
 
 ```bash
 node dist/cli.js run \

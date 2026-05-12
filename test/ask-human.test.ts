@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createLoggedAskHuman } from "../src/tools/ask-human.js";
+import { createLoggedAskHuman, formatHumanPrompt } from "../src/tools/ask-human.js";
 
 describe("createLoggedAskHuman", () => {
   it("logs the question and answer", async () => {
@@ -25,5 +25,17 @@ describe("createLoggedAskHuman", () => {
     expect(traces).toHaveLength(2);
     expect(JSON.stringify(traces)).toContain("Orchestrator Agent");
     expect(JSON.stringify(traces)).toContain("Human");
+  });
+
+  it("formats selectable options while allowing blank input", () => {
+    const prompt = formatHumanPrompt(`请选择调研目的：
+1. 择校
+2. 政策了解
+3. 行业研究`);
+
+    expect(prompt.options).toEqual(["择校", "政策了解", "行业研究"]);
+    expect(prompt.text).toContain("Select 1-3");
+    expect(prompt.text).toContain("press Enter to leave blank");
+    expect(prompt.text).not.toContain("1. 择校\n1. 择校");
   });
 });

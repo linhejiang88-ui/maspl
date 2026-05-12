@@ -9,6 +9,8 @@ MASPL is a local multi-agent self-play CLI for coding tasks. It runs four explic
 
 Claude and Codex are backend adapters only. They run the selected agent task; they do not own the orchestration logic.
 
+![MASPL multi-agent workflow](./example.png)
+
 ## Use Cases
 
 MASPL is for optimization loops that are still mostly stitched together by humans today:
@@ -25,19 +27,20 @@ The goal is to let agents drive execution, review, judgment, and human interacti
 2. Minimal agent management: reuse local Codex and Claude Code capabilities through CLI/SDK integration instead of rebuilding bots or coding agents.
 3. Human-in-the-Loop: agents can work automatically, but key uncertainty, approval, and correction points must go back to the human.
 
-## Requirements
+## Configuration
 
-- Node.js 22+
-- pnpm
+MASPL has only two configuration surfaces:
 
-## Backend Behavior
+1. Local Codex and Claude Code are installed, authenticated, configured with working LLM access, available on `PATH`, and able to execute successfully.
+2. `agentroles.yaml` defines each agent's prompt, backend, permissions, tools, runtime budget, and review/judge protocol.
 
-Backends are local execution adapters. MASPL reuses the local CLI environment, authentication, workspace, and permissions instead of managing a remote agent runtime.
+Backends are local execution adapters. MASPL reuses the local CLI environment, authentication, workspace, and permissions instead of managing a remote agent runtime. Codex is integrated through the [Codex SDK](https://github.com/openai/codex/tree/main/sdk); Claude is integrated through the local Claude Code CLI/SDK environment.
 
-- `--backend claude`: requires local Claude Code CLI installed, authenticated, configured with a working LLM API, available on `PATH`, and able to execute successfully.
-- `--backend codex`: requires local Codex CLI installed, authenticated, configured with a working LLM API, available on `PATH`, and able to execute successfully. Codex is integrated through the [Codex SDK](https://github.com/openai/codex/tree/main/sdk).
+The default roles use Codex for Orchestrator, Exec, and Judge, and Claude for Review. Passing `--backend claude` or `--backend codex` overrides all agent-level backend settings for that run.
 
 ## Install
+
+Prerequisites: Node.js 22+ and pnpm.
 
 ```bash
 pnpm install
@@ -56,17 +59,16 @@ This creates `agentroles.yaml` with prompts, permissions, tool scopes, runtime b
 
 ## Run
 
-Claude backend:
+Default per-agent backends:
 
 ```bash
 node dist/cli.js run \
   --task-name fix-tests-demo \
   --goal "Fix the failing tests and explain what changed" \
-  --roles agentroles.yaml \
-  --backend claude
+  --roles agentroles.yaml
 ```
 
-Codex backend:
+Override every agent to one backend:
 
 ```bash
 node dist/cli.js run \
