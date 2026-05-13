@@ -42,7 +42,7 @@ async function runClaudeAgent(params: ClaudeAgentRunParams, state: ClaudeSession
 
   try {
     const options = {
-      cwd: params.workspace,
+      cwd: params.workingDirectory,
       maxTurns: params.maxTurns ?? params.roles.runtime.maxTurns,
       abortController,
       model: normalizeClaudeModel(role.model),
@@ -60,6 +60,7 @@ async function runClaudeAgent(params: ClaudeAgentRunParams, state: ClaudeSession
     await params.log.appendEvent("Claude Agent Options", {
       agent: params.agent,
       cwd: options.cwd,
+      workspace: params.workspace,
       maxTurns: options.maxTurns,
       model: options.model,
       permissionMode: options.permissionMode,
@@ -135,7 +136,10 @@ function buildPrompt(params: ClaudeAgentRunParams): string {
   return `Goal:
 ${params.goal}
 
-Workspace:
+Current working directory:
+${params.workingDirectory}
+
+MASPL workspace:
 ${params.workspace}
 
 Task:
@@ -172,8 +176,8 @@ async function appendClaudeTrace(params: ClaudeAgentRunParams, message: unknown,
       phase: isError ? "error" : "output",
       status: isError ? "failed" : "completed",
       summary: isError ? "Claude result reported an error." : "Claude result received.",
-      output: message.result,
-      metadata: summarizeSdkMessage(message)
+      output: isError ? message.result : undefined,
+      metadata: summarizeSdkMessage(message, { includeResult: isError })
     });
     return;
   }
@@ -208,7 +212,7 @@ async function appendClaudeTrace(params: ClaudeAgentRunParams, message: unknown,
   }
 }
 
-function summarizeSdkMessage(message: unknown): unknown {
+function summarizeSdkMessage(message: unknown, options?: { includeResult?: boolean }): unknown {
   if (typeof message !== "object" || message === null) return message;
   const record = message as Record<string, unknown>;
 
@@ -217,7 +221,7 @@ function summarizeSdkMessage(message: unknown): unknown {
     subtype: record.subtype,
     session_id: record.session_id,
     parent_tool_use_id: record.parent_tool_use_id,
-    result: record.result,
+    result: options?.includeResult === false ? undefined : record.result,
     message: summarizeNestedMessage(record.message)
   };
 }

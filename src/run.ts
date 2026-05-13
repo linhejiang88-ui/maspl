@@ -9,14 +9,22 @@ import { createCliAskHuman, createLoggedAskHuman } from "./tools/ask-human.js";
 import type { RunOptions, RunResult } from "./types.js";
 
 export async function runMaspl(options: RunOptions): Promise<RunResult> {
-  const { taskName, workspaceRoot, workspace } = resolveProjectWorkspace(options);
+  const { taskName, workspace } = resolveProjectWorkspace(options);
+  const workingDirectory = resolvePath(options.workingDirectory ?? process.cwd());
+  const finalResultPath = path.join(workingDirectory, "result.md");
   await ensureWorkspace(workspace);
+  await ensureWorkspace(workingDirectory);
 
   const rolesPath = path.resolve(options.rolesPath);
   await access(rolesPath);
 
   const roles = await loadRolesConfig(rolesPath);
-  const log = await createSessionLog({ workspace, goal: options.goal });
+  const log = await createSessionLog({
+    workspace,
+    workingDirectory,
+    finalResultPath,
+    goal: options.goal
+  });
   const backends = getBackends();
   const askHuman = createLoggedAskHuman({
     askHuman: createCliAskHuman(),
@@ -32,8 +40,9 @@ export async function runMaspl(options: RunOptions): Promise<RunResult> {
       review: options.backend ?? roles.review.backend,
       judge: options.backend ?? roles.judge.backend
     },
-    workspaceRoot,
     workspace,
+    workingDirectory,
+    finalResultPath,
     rolesPath
   }, { realtime: true });
 
@@ -42,6 +51,7 @@ export async function runMaspl(options: RunOptions): Promise<RunResult> {
     backendOverride: options.backend,
     goal: options.goal,
     workspace,
+    workingDirectory,
     roles,
     log,
     askHuman,
@@ -52,21 +62,23 @@ export async function runMaspl(options: RunOptions): Promise<RunResult> {
   return {
     taskName,
     workspace,
+    workingDirectory,
     runId: log.runId,
     logPath: log.path,
-    resultPath: log.resultPath,
+    internalResultPath: log.resultPath,
+    resultPath: log.finalResultPath,
     agentSessionsPath: log.agentSessionsPath,
     result
   };
 }
 
-export function resolveProjectWorkspace(options: Pick<RunOptions, "taskName" | "workspaceRoot">): {
+export function resolveProjectWorkspace(options: Pick<RunOptions, "taskName">): {
   taskName: string;
   workspaceRoot: string;
   workspace: string;
 } {
   const taskName = normalizeTaskName(options.taskName);
-  const workspaceRoot = resolvePath(options.workspaceRoot);
+  const workspaceRoot = resolvePath("~/.maspl/project");
   return {
     taskName,
     workspaceRoot,

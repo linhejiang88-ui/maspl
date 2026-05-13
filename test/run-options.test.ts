@@ -4,34 +4,22 @@ import { describe, expect, it } from "vitest";
 import { resolveProjectWorkspace } from "../src/run.js";
 
 describe("resolveProjectWorkspace", () => {
-  it("uses task_name as the project directory under the workspace root", () => {
-    expect(
-      resolveProjectWorkspace({
-        taskName: "print-hello",
-        workspaceRoot: "/tmp/maspl-projects"
-      })
-    ).toEqual({
-      taskName: "print-hello",
-      workspaceRoot: "/tmp/maspl-projects",
-      workspace: "/tmp/maspl-projects/print-hello"
-    });
-  });
-
-  it("expands the default home workspace root", () => {
+  it("uses task_name as the default workspace under the MASPL project root", () => {
     const resolved = resolveProjectWorkspace({
-      taskName: "demo",
-      workspaceRoot: "~/.maspl/project"
+      taskName: "review_edu5"
     });
 
-    expect(resolved.workspaceRoot).toBe(path.join(os.homedir(), ".maspl", "project"));
-    expect(resolved.workspace).toBe(path.join(os.homedir(), ".maspl", "project", "demo"));
+    expect(resolved).toEqual({
+      taskName: "review_edu5",
+      workspaceRoot: path.join(os.homedir(), ".maspl", "project"),
+      workspace: path.join(os.homedir(), ".maspl", "project", "review_edu5")
+    });
   });
 
   it("rejects task_name values that are not a single path segment", () => {
     expect(() =>
       resolveProjectWorkspace({
-        taskName: "../demo",
-        workspaceRoot: "/tmp"
+        taskName: "../demo"
       })
     ).toThrow("single path segment");
   });

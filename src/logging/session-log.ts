@@ -32,6 +32,7 @@ export type SessionLog = {
   dir: string;
   path: string;
   resultPath: string;
+  finalResultPath: string;
   agentSessionsPath: string;
   appendEvent(kind: string, value: unknown, options?: { realtime?: boolean }): Promise<void>;
   appendTrace(entry: AgentTraceEntry): Promise<void>;
@@ -47,6 +48,8 @@ const maxInlineChars = 3_000;
 
 export async function createSessionLog(params: {
   workspace: string;
+  workingDirectory?: string;
+  finalResultPath?: string;
   goal: string;
   runId?: string;
 }): Promise<SessionLog> {
@@ -54,6 +57,8 @@ export async function createSessionLog(params: {
   const dir = path.join(params.workspace, ".maspl", "runs", runId);
   const logPath = path.join(dir, "session.md");
   const resultPath = path.join(dir, "result.md");
+  const workingDirectory = params.workingDirectory ?? params.workspace;
+  const finalResultPath = params.finalResultPath ?? resultPath;
   const agentSessionsPath = path.join(dir, "agent-sessions.json");
 
   await mkdir(dir, { recursive: true });
@@ -81,6 +86,7 @@ Agent flow is recorded in chronological order. Long input/output values are comp
     dir,
     path: logPath,
     resultPath,
+    finalResultPath,
     agentSessionsPath,
     appendEvent: async (kind, value, options) => {
       const content = stringifyForLog(value);
@@ -90,7 +96,7 @@ Agent flow is recorded in chronological order. Long input/output values are comp
         "utf8"
       );
       if (options?.realtime) {
-        printRealtime(formatBracketLine(new Date().toISOString(), "Runtime", "event", kind));
+        printRealtime(formatBracketLine(new Date(), "Runtime", "event", kind));
       }
     },
     appendTrace: async (entry) => {
@@ -133,7 +139,7 @@ Agent flow is recorded in chronological order. Long input/output values are comp
       }
       if (changed && record.source === "backend") {
         printRealtime(
-          formatBracketLine(new Date().toISOString(), toAgentDisplayName(agent), "session", record.sessionId)
+          formatBracketLine(new Date(), toAgentDisplayName(agent), "session", record.sessionId)
         );
       }
       return record;
@@ -142,11 +148,17 @@ Agent flow is recorded in chronological order. Long input/output values are comp
       const content = formatResult({
         body,
         workspace: params.workspace,
-        resultPath
+        workingDirectory,
+        resultPath,
+        finalResultPath
       });
       await writeFile(resultPath, content, "utf8");
-      await appendFile(logPath, `\n## Result Artifact\n${resultPath}\n`, "utf8");
-      printRealtime(formatBracketLine(new Date().toISOString(), "Runtime", "result", resultPath));
+      if (finalResultPath !== resultPath) {
+        await mkdir(path.dirname(finalResultPath), { recursive: true });
+        await writeFile(finalResultPath, content, "utf8");
+      }
+      await appendFile(logPath, `\n## Result Artifact\n${finalResultPath}\n\nInternal copy: ${resultPath}\n`, "utf8");
+      printRealtime(formatBracketLine(new Date(), "Runtime", "result", finalResultPath));
     }
   };
 }
@@ -235,21 +247,34 @@ function formatAgentSessions(runId: string, agentSessions: Map<string, AgentSess
   )}\n`;
 }
 
-function formatResult(params: { body: string; workspace: string; resultPath: string }): string {
+function formatResult(params: {
+  body: string;
+  workspace: string;
+  workingDirectory: string;
+  resultPath: string;
+  finalResultPath: string;
+}): string {
   const relativeResultPath = path.relative(params.workspace, params.resultPath);
+  const relativeFinalResultPath = path.relative(params.workingDirectory, params.finalResultPath);
   return `# MASPL Result
 
-## Project Workspace
+## Current Working Directory
+${params.workingDirectory}
+
+## MASPL Workspace
 ${params.workspace}
 
-## Result Artifact
+## Final Result Document
+${params.finalResultPath}
+
+## Internal Run Result Copy
 ${params.resultPath}
 
 ## Output And Usage
 ${params.body.trim() || "(no final output)"}
 
 ## How To Use Or Verify
-Use the files, paths, and commands described in "Output And Usage" above. This artifact is stored inside the project workspace at \`${relativeResultPath}\` for this run.
+Use the files, paths, and commands described in "Output And Usage" above. The final result document is stored at \`${relativeFinalResultPath}\` relative to the current working directory. MASPL also keeps an internal run copy at \`${relativeResultPath}\` inside the artifact workspace.
 `;
 }
 
@@ -259,7 +284,7 @@ function formatTraceEntry(sequence: number, entry: AgentTraceEntry, traceLines: 
     "",
     ...traceLines,
     "",
-    `- time: ${new Date().toISOString()}`,
+    `- time: ${formatDisplayTimestamp(new Date())}`,
     `- summary: ${entry.summary}`
   ];
 
@@ -284,7 +309,7 @@ function formatTraceEntry(sequence: number, entry: AgentTraceEntry, traceLines: 
 }
 
 function formatBracketLines(entry: AgentTraceEntry): string[] {
-  const time = new Date().toISOString();
+  const time = new Date();
   const lines: string[] = [];
 
   if (entry.phase === "handoff" && (entry.fromAgent || entry.toAgent)) {
@@ -356,8 +381,12 @@ function isNoisyLifecycleSummary(summary: string): boolean {
   );
 }
 
-function formatBracketLine(time: string, agent: string, type: string, message: string): string {
-  return `- [${time}]-[${agent}]-[${type}]-[${sanitizeInline(message)}]`;
+function formatBracketLine(time: Date, agent: string, type: string, message: string): string {
+  return `- [${formatDisplayTimestamp(time)}]-[${agent}]-[${type}]-[${sanitizeInline(message)}]`;
+}
+
+export function formatDisplayTimestamp(date: Date): string {
+  return date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "Z");
 }
 
 function fencedBlock(value: unknown, language = ""): string {
@@ -428,7 +457,7 @@ export function compressText(text: string, maxChars = maxInlineChars): string {
   return `${text.slice(0, headChars)}${marker}${text.slice(-tailChars)}`;
 }
 
-function createRunId(date = new Date()): string {
+export function createRunId(date = new Date()): string {
   const stamp = date
     .toISOString()
     .replace(/[-:]/g, "")

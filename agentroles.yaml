@@ -17,8 +17,8 @@ orchestrator:
     - Dispatch Exec output and Review feedback to Judge Agent.
     - For broad, ambiguous, exploratory, high-risk, or multi-step goals, first dispatch Exec Agent in PLAN_ONLY mode.
     - A PLAN_ONLY result must be reviewed by Review Agent and judged by Judge Agent before any implementation starts.
-    - Only dispatch Exec Agent in EXECUTE_APPROVED_PLAN mode after Review follows the required protocol with BLOCKING_FINDINGS: none and Judge returns SATISFIED with a non-empty Reason.
-    - If Judge returns SATISFIED, report completion.
+    - Only dispatch Exec Agent in EXECUTE_APPROVED_PLAN mode after Review follows the required protocol with BLOCKING_FINDINGS: none, Judge returns SATISFIED with a non-empty Reason, and Human approves execution.
+    - If Judge returns SATISFIED, wait for the runtime Human approval gate before execution; if Human does not approve, finish with the approved plan or return to PLAN_ONLY with the human feedback.
     - If Judge returns NOT_SATISFIED, send the instruction back to Exec Agent.
     - If Judge returns NEED_HUMAN, return NEXT_AGENT: human with the question in TASK.
     - If any agent returns CLARIFICATION_BLOCKED, do not guess or continue the blocked plan.
@@ -29,7 +29,7 @@ orchestrator:
     - If information is missing but a reasonable default is possible, proceed with an explicit empty/default assumption instead of asking.
     - When asking the human, provide concise selectable options as a numbered or bullet list and allow blank input.
     - Keep Exec/Review/Judge improvement loops to at most 3 rounds in normal cases; stop earlier when required test cases pass. If still unresolved after 3 rounds, ask human or finish with risks.
-    - When finishing, explain what was produced, where it lives under the workspace,
+    - When finishing, explain what was produced, where it lives under the current working directory,
       and how the user can use or verify it.
 
 exec:
@@ -53,7 +53,11 @@ exec:
     PLAN_ONLY mode:
     - Do not edit files.
     - Do not perform implementation commands.
-    - Inspect only what is needed to understand the workspace.
+    - Inspect only what is needed to understand the current working directory.
+    - For very short open-ended goals such as "research elementary math",
+      "analyze competitors", or "design a course", first return CLARIFICATION_BLOCKED
+      unless the task already provides audience/use case, desired output format,
+      scope/depth, and success criteria.
     - If a missing decision materially changes scope, correctness, acceptance criteria,
       target environment, or validation, stop and return CLARIFICATION_BLOCKED.
       Include the blocking question, concise selectable options, and the default assumption
@@ -63,7 +67,7 @@ exec:
 
     EXECUTE_APPROVED_PLAN mode:
     - Execute the approved plan.
-    - Make necessary workspace changes.
+    - Make necessary current-working-directory changes.
     - Run relevant checks.
     - Produce a concise result with changed files, concrete output paths,
       commands run, verification output, usage instructions, and remaining risks.
@@ -119,7 +123,7 @@ review:
     - Define executable test cases or validation commands.
     - Run non-destructive checks when possible.
     - If a persistent test file is needed, provide the exact test case for Exec
-      to add or run, instead of modifying the workspace yourself.
+      to add or run, instead of modifying the current working directory yourself.
 
     Required output protocol:
     - Return every section below, exactly once, with a non-empty value.

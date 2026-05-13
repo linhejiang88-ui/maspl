@@ -214,6 +214,49 @@ describe("backend agent sessions", () => {
     expect(options?.sandboxMode).toBe("read-only");
   });
 
+  it("runs Codex agents from the provided working directory", async () => {
+    const workspace = path.join("/private/tmp", `maspl-codex-working-dir-${process.pid}`);
+    const workingDirectory = path.join(workspace, "project");
+    await mkdir(workingDirectory, { recursive: true });
+
+    let options: Record<string, unknown> | undefined;
+    let prompt = "";
+    const sdk: CodexSdkModule = {
+      Codex: class {
+        startThread(threadOptions?: Record<string, unknown>) {
+          options = threadOptions;
+          return {
+            id: "working-dir-thread",
+            async runStreamed(input: string) {
+              prompt = input;
+              return {
+                events: asyncIterable([
+                  {
+                    type: "item.completed",
+                    item: {
+                      id: "msg",
+                      type: "agent_message",
+                      text: "ok"
+                    }
+                  }
+                ])
+              };
+            }
+          };
+        }
+      }
+    };
+
+    const backend = createCodexBackend(sdk);
+    const params = await createParams(workspace);
+
+    await backend.runAgent({ ...params, workingDirectory, agent: "exec", task: "exec task" });
+
+    expect(options?.workingDirectory).toBe(workingDirectory);
+    expect(prompt).toContain(`Current working directory:\n${workingDirectory}`);
+    expect(prompt).toContain(`MASPL workspace:\n${workspace}`);
+  });
+
   it("does not treat prior PLAN_ONLY context as Codex plan-only mode", async () => {
     const workspace = path.join("/private/tmp", `maspl-codex-current-task-mode-${process.pid}`);
     await mkdir(workspace, { recursive: true });
@@ -389,6 +432,36 @@ describe("backend agent sessions", () => {
     expect(allowedTools).toEqual(["Read", "Grep", "Glob", "Bash"]);
   });
 
+  it("runs Claude agents from the provided working directory", async () => {
+    const workspace = path.join("/private/tmp", `maspl-claude-working-dir-${process.pid}`);
+    const workingDirectory = path.join(workspace, "project");
+    await mkdir(workingDirectory, { recursive: true });
+
+    let cwd: unknown;
+    let prompt = "";
+    const sdk: ClaudeSdkModule = {
+      async *query(args: { prompt: string; options?: Record<string, unknown> }) {
+        cwd = args.options?.cwd;
+        prompt = args.prompt;
+        yield {
+          type: "result",
+          subtype: "success",
+          session_id: "working-dir-session",
+          result: "ok"
+        };
+      }
+    };
+
+    const backend = createClaudeBackend(sdk);
+    const params = await createParams(workspace);
+
+    await backend.runAgent({ ...params, workingDirectory, agent: "review", task: "review task" });
+
+    expect(cwd).toBe(workingDirectory);
+    expect(prompt).toContain(`Current working directory:\n${workingDirectory}`);
+    expect(prompt).toContain(`MASPL workspace:\n${workspace}`);
+  });
+
   it("does not treat prior PLAN_ONLY context as Claude plan-only mode", async () => {
     const workspace = path.join("/private/tmp", `maspl-claude-current-task-mode-${process.pid}`);
     await mkdir(workspace, { recursive: true });
@@ -470,6 +543,43 @@ describe("backend agent sessions", () => {
       "already owned by exec"
     );
   });
+
+  it("does not duplicate successful Claude result output after assistant text", async () => {
+    const workspace = path.join("/private/tmp", `maspl-claude-result-log-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+
+    const finalText = "PROBLEM_FRAMING: review result";
+    const sdk: ClaudeSdkModule = {
+      async *query() {
+        yield {
+          type: "assistant",
+          session_id: "review-session",
+          message: {
+            id: "msg-1",
+            role: "assistant",
+            content: [{ type: "text", text: finalText }]
+          }
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          session_id: "review-session",
+          result: finalText
+        };
+      }
+    };
+
+    const backend = createClaudeBackend(sdk);
+    const params = await createParams(workspace);
+
+    await expect(backend.runAgent({ ...params, agent: "review", task: "review task" })).resolves.toBe(finalText);
+
+    const content = await readFile(params.log.path, "utf8");
+    expect(content.match(/\*\*Output\*\*/g)).toHaveLength(1);
+    expect(content.match(/\]-\[Review Agent\]-\[output\]-\[PROBLEM_FRAMING: review result\]/g)).toHaveLength(1);
+    expect(content).toContain("Claude result received.");
+    expect(content).not.toContain('"result": "PROBLEM_FRAMING: review result"');
+  });
 });
 
 async function createParams(workspace: string): Promise<Omit<AgentRunParams, "agent" | "task">> {
@@ -483,6 +593,7 @@ async function createParams(workspace: string): Promise<Omit<AgentRunParams, "ag
   return {
     goal: "test per-agent sessions",
     workspace,
+    workingDirectory: workspace,
     roles,
     log
   };

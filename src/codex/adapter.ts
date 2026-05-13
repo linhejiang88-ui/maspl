@@ -75,7 +75,8 @@ async function runCodexAgent(
   try {
     await params.log.appendEvent("Codex Agent Options", {
       agent: params.agent,
-      workingDirectory: params.workspace,
+      workingDirectory: params.workingDirectory,
+      workspace: params.workspace,
       skipGitRepoCheck: true,
       sandboxMode: sandboxForAgent(params),
       approvalPolicy: "on-request",
@@ -139,7 +140,10 @@ function buildPrompt(params: CodexAgentRunParams): string {
 Goal:
 ${params.goal}
 
-Workspace:
+Current working directory:
+${params.workingDirectory}
+
+MASPL workspace:
 ${params.workspace}
 
 Task:
@@ -292,7 +296,7 @@ function threadOptionsForAgent(
   sandboxMode: "read-only" | "workspace-write" = sandboxForAgent(params)
 ): Record<string, unknown> {
   return {
-    workingDirectory: params.workspace,
+    workingDirectory: params.workingDirectory,
     skipGitRepoCheck: true,
     sandboxMode,
     approvalPolicy: "on-request",

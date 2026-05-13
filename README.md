@@ -79,21 +79,14 @@ node dist/cli.js run \
 常用参数：
 
 ```bash
---workspace ~/.maspl/project
 --max-turns 30
 --timeout-ms 1800000
 ```
 
-`--task-name` 必填，并且必须是单个路径段。默认情况下，MASPL 会在以下目录运行：
+`--task-name` 必填，并且必须是单个路径段。默认情况下，MASPL 会把运行记录写到：
 
 ```text
 ~/.maspl/project/<task_name>/
-```
-
-如果传入 `--workspace <root>`，MASPL 会在以下目录运行：
-
-```text
-<root>/<task_name>/
 ```
 
 ## 多 Agent 流程
@@ -124,7 +117,7 @@ TASK:
 
 ## 产出
 
-每次运行会在任务 workspace 内写入：
+Agent 会在启动 `maspl run` 的当前目录运行。每次运行会在 MASPL artifact workspace 内写入运行状态和内部 `result.md`：
 
 ```text
 <workspace>/.maspl/runs/<run-id>/session.md
@@ -132,14 +125,20 @@ TASK:
 <workspace>/.maspl/runs/<run-id>/result.md
 ```
 
-`result.md` 是最终交付物，应说明产出了什么、产出位于 workspace 的哪个路径，以及如何使用或验证。
+模型最终结论文档也会写到启动命令的当前目录：
+
+```text
+./result.md
+```
+
+`result.md` 应说明产出了什么、产出位于当前目录的哪个路径，以及如何使用或验证。
 
 `agent-sessions.json` 记录本次运行中每个 Agent 的 backend session id。不同 Agent 不能共享同一个 session id。
 
 ## 说明
 
 - `runtime.allowedTools` 是硬 allowlist。Agent role tools 会先与它取交集，再传给 backend 执行。
-- 只有 Exec 角色预期会修改 workspace。
+- 只有 Exec 角色预期会修改当前目录；MASPL Runtime 写 artifact workspace 下的运行状态，并把最终结论文档写到当前目录。
 - Human-in-the-Loop 通过 `NEXT_AGENT: human` 实现，不依赖 backend 专属的人审 MCP tool。
 - 飞书、Telegram 等 gateway 集成不属于 MVP 范围。
 

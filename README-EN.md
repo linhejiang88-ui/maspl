@@ -79,21 +79,14 @@ node dist/cli.js run \
 Useful options:
 
 ```bash
---workspace ~/.maspl/project
 --max-turns 30
 --timeout-ms 1800000
 ```
 
-`--task-name` is required and must be a single path segment. By default, MASPL runs inside:
+`--task-name` is required and must be a single path segment. By default, MASPL writes run state inside:
 
 ```text
 ~/.maspl/project/<task_name>/
-```
-
-If `--workspace <root>` is provided, MASPL runs inside:
-
-```text
-<root>/<task_name>/
 ```
 
 ## Multi-Agent Flow
@@ -124,7 +117,7 @@ Invalid dispatch is retried once. If it is still invalid, the run fails instead 
 
 ## Output
 
-Each run writes artifacts inside the task workspace:
+Agents run in the directory where you start `maspl run`. MASPL writes run state and the internal `result.md` inside the MASPL artifact workspace:
 
 ```text
 <workspace>/.maspl/runs/<run-id>/session.md
@@ -132,7 +125,13 @@ Each run writes artifacts inside the task workspace:
 <workspace>/.maspl/runs/<run-id>/result.md
 ```
 
-`result.md` is the final delivery artifact. It should explain what was produced, where it lives in the workspace, and how to use or verify it.
+The model's final conclusion document is also written to the current directory:
+
+```text
+./result.md
+```
+
+`result.md` should explain what was produced, where it lives in the current directory, and how to use or verify it.
 
 `agent-sessions.json` records the per-agent backend session ids for the run. Different agents cannot share the same session id.
 

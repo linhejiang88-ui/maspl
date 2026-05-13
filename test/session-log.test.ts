@@ -12,8 +12,13 @@ describe("createSessionLog", () => {
 
   it("creates a session markdown file", async () => {
     await mkdir(workspace, { recursive: true });
+    const workingDirectory = path.join(workspace, "current-project");
+    await mkdir(workingDirectory, { recursive: true });
+    const finalResultPath = path.join(workingDirectory, "result.md");
     const log = await createSessionLog({
       workspace,
+      workingDirectory,
+      finalResultPath,
       goal: "ship it",
       runId: "test-run"
     });
@@ -50,13 +55,23 @@ describe("createSessionLog", () => {
     expect(content).toContain("Orchestrator Agent -> Review Agent");
     expect(content).toContain("- [");
     expect(content).toContain("]-[Orchestrator Agent]-[handoff]-[Orchestrator Agent -> Review Agent]");
+    expect(content).toMatch(/- \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z\]-\[Orchestrator Agent\]/);
+    expect(content).not.toMatch(/- \[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\]/);
+    expect(content).toMatch(/- time: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z/);
     expect(content).toContain("[compressed: omitted");
     expect(content).toContain("````");
 
     const result = await readFile(log.resultPath, "utf8");
-    expect(result).toContain("## Project Workspace");
+    const finalResult = await readFile(log.finalResultPath, "utf8");
+    expect(finalResult).toBe(result);
+    expect(log.finalResultPath).toBe(finalResultPath);
+    expect(result).toContain("## Current Working Directory");
+    expect(result).toContain(workingDirectory);
+    expect(result).toContain("## MASPL Workspace");
     expect(result).toContain(workspace);
-    expect(result).toContain("## Result Artifact");
+    expect(result).toContain("## Final Result Document");
+    expect(result).toContain(finalResultPath);
+    expect(result).toContain("## Internal Run Result Copy");
     expect(result).toContain(log.resultPath);
     expect(result).toContain("## Output And Usage");
     expect(result).toContain("created app.js");

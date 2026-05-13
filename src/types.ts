@@ -38,7 +38,7 @@ export type BackendName = "claude" | "codex";
 export type RunOptions = {
   taskName: string;
   goal: string;
-  workspaceRoot: string;
+  workingDirectory?: string;
   rolesPath: string;
   backend?: BackendName;
   maxTurns?: number;
@@ -48,8 +48,10 @@ export type RunOptions = {
 export type RunResult = {
   taskName: string;
   workspace: string;
+  workingDirectory: string;
   runId: string;
   logPath: string;
+  internalResultPath: string;
   resultPath: string;
   agentSessionsPath: string;
   result?: string;

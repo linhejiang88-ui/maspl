@@ -9,6 +9,7 @@ export type AgentRunParams = {
   taskInstruction?: string;
   goal: string;
   workspace: string;
+  workingDirectory: string;
   roles: RolesConfig;
   log: SessionLog;
   maxTurns?: number;

@@ -21,6 +21,7 @@ type PlanGateState = {
   planVersion: number;
   reviewedPlanVersion: number | undefined;
   judgedPlanVersion: number | undefined;
+  humanApprovedPlanVersion: number | undefined;
   reviewPassed: boolean;
   judgePassed: boolean;
 };
@@ -62,6 +63,7 @@ export type RunOrchestrationParams = {
   backendOverride?: BackendName;
   goal: string;
   workspace: string;
+  workingDirectory?: string;
   roles: RolesConfig;
   log: SessionLog;
   askHuman: AskHuman;
@@ -76,6 +78,7 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
     planVersion: 0,
     reviewedPlanVersion: undefined,
     judgedPlanVersion: undefined,
+    humanApprovedPlanVersion: undefined,
     reviewPassed: false,
     judgePassed: false
   };
@@ -89,6 +92,7 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
     input: {
       goal: params.goal,
       workspace: params.workspace,
+      workingDirectory: effectiveWorkingDirectory(params),
       backends: formatAgentBackendMap(params)
     }
   });
@@ -158,6 +162,7 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
         taskInstruction: dispatch.task,
         goal: params.goal,
         workspace: params.workspace,
+        workingDirectory: effectiveWorkingDirectory(params),
         roles: params.roles,
         log: params.log,
         maxTurns: params.maxTurns,
@@ -172,12 +177,15 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
       handoffSummary = `${targetName} was blocked by permissions and returned control to Orchestrator.`;
     }
 
+    const previousOutputs = [...outputs];
     outputs.push({
       agent: targetName,
       task: dispatch.task,
       output
     });
-    const gateUpdateMessage = updatePlanGate(planGate, dispatch.nextAgent, dispatch.task, output);
+    const gateUpdateMessage =
+      validateExecPlanOnlyClarification(params.goal, previousOutputs, dispatch, output) ??
+      updatePlanGate(planGate, dispatch.nextAgent, dispatch.task, output);
     if (gateUpdateMessage) {
       await params.log.appendTrace({
         agent: "Runtime",
@@ -204,6 +212,11 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
       input: dispatch.task,
       output
     });
+
+    if (dispatch.nextAgent === "judge" && shouldRequestPlanExecutionApproval(planGate)) {
+      const approvalOutput = await requestPlanExecutionApproval(params, planGate);
+      outputs.push(approvalOutput);
+    }
   }
 
   const orchestratorBackend = getAgentBackend(params, "orchestrator");
@@ -213,6 +226,7 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
     taskInstruction: buildForcedFinalTask(outputs),
     goal: params.goal,
     workspace: params.workspace,
+    workingDirectory: effectiveWorkingDirectory(params),
     roles: params.roles,
     log: params.log,
     maxTurns: params.maxTurns,
@@ -256,6 +270,10 @@ function formatAgentBackendMap(params: RunOrchestrationParams): Record<AgentRole
   };
 }
 
+function effectiveWorkingDirectory(params: Pick<RunOrchestrationParams, "workingDirectory" | "workspace">): string {
+  return params.workingDirectory ?? params.workspace;
+}
+
 function validatePlanGateDispatch(dispatch: Dispatch, planGate: PlanGateState): string | undefined {
   if (dispatch.nextAgent !== "exec") {
     return undefined;
@@ -282,6 +300,10 @@ function validatePlanGateDispatch(dispatch: Dispatch, planGate: PlanGateState): 
     return "Runtime blocked EXECUTE_APPROVED_PLAN. Exec mode opens only after Review reports no blocking findings and Judge returns SATISFIED for the PLAN_ONLY plan.";
   }
 
+  if (planGate.humanApprovedPlanVersion !== planGate.planVersion) {
+    return "Runtime blocked EXECUTE_APPROVED_PLAN. Human approval is required after Judge SATISFIED.";
+  }
+
   return undefined;
 }
 
@@ -296,6 +318,7 @@ function updatePlanGate(
     planGate.planVersion += 1;
     planGate.reviewedPlanVersion = undefined;
     planGate.judgedPlanVersion = undefined;
+    planGate.humanApprovedPlanVersion = undefined;
     planGate.reviewPassed = false;
     planGate.judgePassed = false;
     return undefined;
@@ -312,6 +335,7 @@ function updatePlanGate(
     if (!planGate.reviewPassed) {
       planGate.judgePassed = false;
       planGate.judgedPlanVersion = undefined;
+      planGate.humanApprovedPlanVersion = undefined;
       return formatReviewValidationFailure(validation);
     }
     return undefined;
@@ -328,6 +352,7 @@ function updatePlanGate(
     if (!planGate.judgePassed) {
       planGate.reviewPassed = false;
       planGate.reviewedPlanVersion = undefined;
+      planGate.humanApprovedPlanVersion = undefined;
       if (!validation.passed) {
         return formatJudgeValidationFailure(validation);
       }
@@ -335,6 +360,125 @@ function updatePlanGate(
   }
 
   return undefined;
+}
+
+function validateExecPlanOnlyClarification(
+  goal: string,
+  previousOutputs: AgentOutput[],
+  dispatch: Dispatch,
+  output: string | undefined
+): string | undefined {
+  if (dispatch.nextAgent !== "exec" || !isPlanOnlyTask(dispatch.task)) {
+    return undefined;
+  }
+
+  if (!requiresInitialClarification(goal, previousOutputs)) {
+    return undefined;
+  }
+
+  if (/\bCLARIFICATION_BLOCKED\b/.test(output ?? "")) {
+    return undefined;
+  }
+
+  return "CLARIFICATION_REQUIRED: Runtime blocked the PLAN_ONLY output because the initial goal is broad or underspecified. Exec must return CLARIFICATION_BLOCKED with a blocking question, numbered options with impact, and Default if blank before producing a concrete plan.";
+}
+
+function requiresInitialClarification(goal: string, outputs: AgentOutput[]): boolean {
+  if (outputs.some((output) => output.agent === "Human")) {
+    return false;
+  }
+
+  if (outputs.some((output) => /\bCLARIFICATION_BLOCKED\b/.test(output.output ?? ""))) {
+    return false;
+  }
+
+  const normalized = goal.trim();
+  if (!normalized) {
+    return true;
+  }
+
+  return hasBroadIntent(normalized) && isVeryShortGoal(normalized);
+}
+
+function hasBroadIntent(goal: string): boolean {
+  return /调研|研究|分析|了解|探索|整理|规划|设计|做|写|research|investigate|analy[sz]e|explore|study|plan|design|write/i.test(
+    goal
+  );
+}
+
+function isVeryShortGoal(goal: string): boolean {
+  const cjkChars = goal.match(/[\p{Script=Han}]/gu)?.length ?? 0;
+  if (cjkChars > 0) {
+    return cjkChars <= 10;
+  }
+
+  const words = goal.match(/[A-Za-z0-9]+/g)?.length ?? 0;
+  return words > 0 && words <= 5;
+}
+
+async function requestPlanExecutionApproval(
+  params: RunOrchestrationParams,
+  planGate: PlanGateState
+): Promise<AgentOutput> {
+  const question = buildPlanExecutionApprovalQuestion(planGate.planVersion);
+  const answer = await params.askHuman(question);
+  const decision = classifyPlanExecutionApproval(answer);
+  if (decision === "approve") {
+    planGate.humanApprovedPlanVersion = planGate.planVersion;
+  } else if (planGate.humanApprovedPlanVersion === planGate.planVersion) {
+    planGate.humanApprovedPlanVersion = undefined;
+  }
+
+  return {
+    agent: "Human",
+    task: question,
+    output: formatPlanExecutionApprovalOutput(decision, answer)
+  };
+}
+
+type PlanExecutionApprovalDecision = "approve" | "deny" | "modify";
+
+function shouldRequestPlanExecutionApproval(planGate: PlanGateState): boolean {
+  return (
+    planGate.judgePassed &&
+    planGate.judgedPlanVersion === planGate.planVersion &&
+    planGate.humanApprovedPlanVersion !== planGate.planVersion
+  );
+}
+
+function buildPlanExecutionApprovalQuestion(planVersion: number): string {
+  return `Judge returned SATISFIED for PLAN_ONLY version ${planVersion}. Confirm whether runtime should execute the approved plan.
+1. Approve execution - continue with EXECUTE_APPROVED_PLAN.
+2. Do not execute - stop after the approved plan.
+3. Modify plan/scope - return to PLAN_ONLY with human feedback.
+Default if blank: Do not execute.`;
+}
+
+function classifyPlanExecutionApproval(answer: string | undefined): PlanExecutionApprovalDecision {
+  const normalized = answer?.trim().toLowerCase() ?? "";
+  if (!normalized) return "deny";
+  if (/^(1|approve|approved|yes|y)\b/.test(normalized) || normalized.includes("approve execution")) {
+    return "approve";
+  }
+  if (/^(2|deny|no|n|stop)\b/.test(normalized) || normalized.includes("do not execute")) {
+    return "deny";
+  }
+  return "modify";
+}
+
+function formatPlanExecutionApprovalOutput(
+  decision: PlanExecutionApprovalDecision,
+  answer: string | undefined
+): string {
+  const rawAnswer = answer?.trim();
+  switch (decision) {
+    case "approve":
+      return "PLAN_EXECUTION_APPROVED: Human approved executing the Judge-satisfied PLAN_ONLY plan.";
+    case "modify":
+      return `PLAN_EXECUTION_MODIFY: Human requested plan or scope changes before execution.${rawAnswer ? `\nHuman feedback: ${rawAnswer}` : ""}`;
+    case "deny":
+      return `PLAN_EXECUTION_DENIED: Human did not approve execution. Stop after the approved plan unless the human later approves execution.${rawAnswer ? `\nHuman feedback: ${rawAnswer}` : ""}`;
+  }
 }
 
 async function requestDispatch(
@@ -353,6 +497,7 @@ async function requestDispatch(
       taskInstruction: task,
       goal: params.goal,
       workspace: params.workspace,
+      workingDirectory: effectiveWorkingDirectory(params),
       roles: params.roles,
       log: params.log,
       maxTurns: params.maxTurns,
@@ -384,7 +529,10 @@ function buildDispatchTask(params: RunOrchestrationParams, outputs: AgentOutput[
 Goal:
 ${params.goal}
 
-Workspace:
+Current working directory:
+${effectiveWorkingDirectory(params)}
+
+MASPL workspace:
 ${params.workspace}
 
 Agent outputs so far:
@@ -397,8 +545,9 @@ Decide:
 Planning gate:
 - For broad, ambiguous, exploratory, high-risk, or multi-step goals, first choose exec with a TASK that starts with PLAN_ONLY.
 - A PLAN_ONLY output must go to review, then judge.
-- Exec mode opens only after Review reports no blocking findings and Judge returns SATISFIED for the PLAN_ONLY plan.
-- Do not choose exec with EXECUTE_APPROVED_PLAN until both conditions are true.
+- Exec mode opens only after Review reports no blocking findings, Judge returns SATISFIED for the PLAN_ONLY plan, and Human approves execution.
+- Do not choose exec with EXECUTE_APPROVED_PLAN until all three conditions are true.
+- If Human does not approve execution after Judge SATISFIED, finish with the approved plan or return to PLAN_ONLY with the human feedback.
 - If judge rejects the plan, send the requested plan improvements back to exec in PLAN_ONLY mode.
 - For narrow deterministic goals, direct execution is allowed, but review should still define or run concrete validation.
 
@@ -418,7 +567,7 @@ TASK:
 
 If NEXT_AGENT is done, TASK must explain:
 - final output;
-- where the output lives in the workspace;
+- where the output lives in the current working directory;
 - how to use or verify it.`;
 }
 
@@ -430,11 +579,14 @@ function buildAgentTask(
 ): string {
   const reviewProtocol = agent === "review" ? `\n${buildReviewProtocolInstruction()}\n` : "";
   const judgeProtocol = agent === "judge" ? `\n${buildJudgeProtocolInstruction()}\n` : "";
-  const execProtocol = agent === "exec" && isPlanOnlyTask(task) ? `\n${buildExecPlanOnlyInstruction()}\n` : "";
+  const execProtocol = agent === "exec" && isPlanOnlyTask(task) ? `\n${buildExecPlanOnlyInstruction(params.goal, outputs)}\n` : "";
   return `Goal:
 ${params.goal}
 
-Workspace:
+Current working directory:
+${effectiveWorkingDirectory(params)}
+
+MASPL workspace:
 ${params.workspace}
 
 Task from Orchestrator:
@@ -449,7 +601,15 @@ ${judgeProtocol}
 Follow your role prompt and return your result to Orchestrator.`;
 }
 
-function buildExecPlanOnlyInstruction(): string {
+function buildExecPlanOnlyInstruction(goal: string, outputs: AgentOutput[]): string {
+  const clarificationRequired = requiresInitialClarification(goal, outputs)
+    ? `
+Initial clarification gate:
+- This user goal is too short/open-ended to plan safely without a human scope decision.
+- Return CLARIFICATION_BLOCKED before producing a concrete plan.
+- Ask for the intended audience/use case, desired output format, scope/depth, and success criteria.
+`
+    : "";
   return `Exec PLAN_ONLY protocol for this turn:
 - Stay read-only and do not implement.
 - Produce a plan only if the scope, correctness target, acceptance criteria, target environment,
@@ -457,7 +617,7 @@ function buildExecPlanOnlyInstruction(): string {
 - If any missing decision materially changes scope, correctness, acceptance criteria,
   target environment, or validation, return CLARIFICATION_BLOCKED.
 - CLARIFICATION_BLOCKED must include the blocking question, numbered options with impact,
-  and Default if blank.`;
+  and Default if blank.${clarificationRequired}`;
 }
 
 function buildReviewProtocolInstruction(): string {
@@ -491,7 +651,7 @@ function buildJudgeProtocolInstruction(): string {
 
 function buildForcedFinalTask(outputs: AgentOutput[]): string {
   return `The dispatch budget is exhausted. Summarize the current state for the user.
-Include final output, where the output lives in the workspace, and how to use or verify it.
+Include final output, where the output lives in the current working directory, and how to use or verify it.
 
 Agent outputs:
 ${formatAgentOutputs(outputs)}`;

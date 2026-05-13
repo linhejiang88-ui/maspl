@@ -27,9 +27,8 @@ program
 program
   .command("run")
   .description("Run one AI Native self-play session")
-  .requiredOption("-t, --task-name <task_name>", "unique task name; project workspace is <workspace-root>/<task_name>")
+  .requiredOption("-t, --task-name <task_name>", "unique task name recorded in the MASPL run")
   .requiredOption("-g, --goal <goal>", "goal for the Orchestrator Agent")
-  .option("-w, --workspace <path>", "workspace root path", "~/.maspl/project")
   .option("-r, --roles <path>", "agentroles.yaml path", "agentroles.yaml")
   .option("-b, --backend <backend>", "override all agent backends: claude or codex", parseBackend)
   .option("--max-turns <number>", "override runtime max turns", parsePositiveInt)
@@ -38,7 +37,6 @@ program
     async (options: {
       taskName: string;
       goal: string;
-      workspace: string;
       roles: string;
       backend?: BackendName;
       maxTurns?: number;
@@ -47,7 +45,6 @@ program
       const result = await runMaspl({
         taskName: options.taskName,
         goal: options.goal,
-        workspaceRoot: options.workspace,
         rolesPath: options.roles,
         backend: options.backend,
         maxTurns: options.maxTurns,
@@ -56,10 +53,12 @@ program
 
       console.log(`Run ${result.runId} finished.`);
       console.log(`Task name: ${result.taskName}`);
-      console.log(`Workspace: ${result.workspace}`);
+      console.log(`Working directory: ${result.workingDirectory}`);
+      console.log(`MASPL workspace: ${result.workspace}`);
       console.log(`Session log: ${result.logPath}`);
       console.log(`Agent sessions: ${result.agentSessionsPath}`);
-      console.log(`Result artifact: ${result.resultPath}`);
+      console.log(`Result document: ${result.resultPath}`);
+      console.log(`Internal result copy: ${result.internalResultPath}`);
       if (result.result) {
         console.log("\nFinal result:\n");
         console.log(result.result);
