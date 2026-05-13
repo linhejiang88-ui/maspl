@@ -14,7 +14,7 @@ describe("createSessionLog", () => {
     await mkdir(workspace, { recursive: true });
     const workingDirectory = path.join(workspace, "current-project");
     await mkdir(workingDirectory, { recursive: true });
-    const finalResultPath = path.join(workingDirectory, "result.md");
+    const finalResultPath = path.join(workspace, "result.md");
     const log = await createSessionLog({
       workspace,
       workingDirectory,

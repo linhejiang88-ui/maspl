@@ -11,7 +11,7 @@ import type { RunOptions, RunResult } from "./types.js";
 export async function runMaspl(options: RunOptions): Promise<RunResult> {
   const { taskName, workspace } = resolveProjectWorkspace(options);
   const workingDirectory = resolvePath(options.workingDirectory ?? process.cwd());
-  const finalResultPath = path.join(workingDirectory, "result.md");
+  const finalResultPath = path.join(workspace, "result.md");
   await ensureWorkspace(workspace);
   await ensureWorkspace(workingDirectory);
 

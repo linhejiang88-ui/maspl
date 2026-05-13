@@ -435,6 +435,58 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
     expect(questions[0]).toContain("Default if blank: Do not execute.");
   });
 
+  it("allows EXECUTE_APPROVED_PLAN after Chinese Human approval", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-plan-gate-chinese-approval-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-plan-gate-chinese-approval-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+    const questions: string[] = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec" && params.task.includes("PLAN_ONLY")) return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") return validReviewOutput();
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge") return "SATISFIED\nReason: plan reviewed and acceptable.";
+        if (params.agent === "orchestrator" && calls.length === 7) {
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: implement the reviewed plan.";
+        }
+        if (params.agent === "exec" && params.task.includes("EXECUTE_APPROVED_PLAN")) return "Implemented.";
+        return "NEXT_AGENT: done\nTASK:\nAll done.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async (question) => {
+        questions.push(question);
+        return "批准执行：允许 Exec Agent 按已通过的计划执行快速调研，并在 `/Users/admin/work/github/tmp` 下产出调研报告。";
+      }
+    });
+
+    expect(result).toBe("All done.");
+    expect(questions).toHaveLength(1);
+    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(true);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).not.toContain("Human approval is required after Judge SATISFIED");
+  });
+
   it("blocks EXECUTE_APPROVED_PLAN when Human does not approve after Judge is satisfied", async () => {
     const workspace = path.join("/private/tmp", `maspl-loop-plan-human-deny-${process.pid}`);
     await mkdir(workspace, { recursive: true });
@@ -485,6 +537,55 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
     const content = await readFile(log.path, "utf8");
     expect(content).toContain("Human approval is required after Judge SATISFIED");
   });
+
+  it.each(["不批准执行", "不同意执行", "不允许执行"])(
+    "blocks EXECUTE_APPROVED_PLAN when Chinese Human answer is %s",
+    async (humanAnswer) => {
+      const workspace = path.join("/private/tmp", `maspl-loop-plan-chinese-deny-${process.pid}-${humanAnswer}`);
+      await mkdir(workspace, { recursive: true });
+      const roles = parseRolesConfig(defaultRolesYaml);
+      const log = await createSessionLog({ workspace, goal: "test", runId: `loop-plan-chinese-deny-${humanAnswer}` });
+      const calls: Array<{ agent: string; task: string }> = [];
+
+      const backend: AgentBackend = {
+        name: "fake",
+        async runAgent(params: AgentRunParams) {
+          calls.push({ agent: params.agent, task: params.task });
+          if (params.agent === "orchestrator" && calls.length === 1) {
+            return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+          }
+          if (params.agent === "exec" && params.task.includes("PLAN_ONLY")) return "Plan ready.";
+          if (params.agent === "orchestrator" && calls.length === 3) {
+            return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+          }
+          if (params.agent === "review") return validReviewOutput();
+          if (params.agent === "orchestrator" && calls.length === 5) {
+            return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+          }
+          if (params.agent === "judge") return "SATISFIED\nReason: plan reviewed and acceptable.";
+          if (params.agent === "orchestrator" && calls.length === 7) {
+            return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: must remain blocked.";
+          }
+          return "NEXT_AGENT: done\nTASK:\nStopped after Chinese denial.";
+        }
+      };
+
+      const result = await runOrchestration({
+        backend,
+        goal: "test",
+        workspace,
+        roles,
+        log,
+        askHuman: async () => humanAnswer
+      });
+
+      expect(result).toBe("Stopped after Chinese denial.");
+      expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(false);
+
+      const content = await readFile(log.path, "utf8");
+      expect(content).toContain("Human approval is required after Judge SATISFIED");
+    }
+  );
 
   it("blocks EXECUTE_APPROVED_PLAN and exposes Human feedback when Human requests plan changes", async () => {
     const workspace = path.join("/private/tmp", `maspl-loop-plan-human-modify-${process.pid}`);

@@ -125,20 +125,20 @@ Agent 会在启动 `maspl run` 的当前目录运行。每次运行会在 MASPL 
 <workspace>/.maspl/runs/<run-id>/result.md
 ```
 
-模型最终结论文档也会写到启动命令的当前目录：
+模型最终结论文档也会写到 MASPL artifact workspace 根目录：
 
 ```text
-./result.md
+<workspace>/result.md
 ```
 
-`result.md` 应说明产出了什么、产出位于当前目录的哪个路径，以及如何使用或验证。
+`result.md` 应说明产出了什么、产出位于工作目录或 artifact workspace 的哪个路径，以及如何使用或验证。
 
 `agent-sessions.json` 记录本次运行中每个 Agent 的 backend session id。不同 Agent 不能共享同一个 session id。
 
 ## 说明
 
 - `runtime.allowedTools` 是硬 allowlist。Agent role tools 会先与它取交集，再传给 backend 执行。
-- 只有 Exec 角色预期会修改当前目录；MASPL Runtime 写 artifact workspace 下的运行状态，并把最终结论文档写到当前目录。
+- 只有 Exec 角色预期会修改当前目录；MASPL Runtime 写 artifact workspace 下的运行状态和最终结论文档。
 - Human-in-the-Loop 通过 `NEXT_AGENT: human` 实现，不依赖 backend 专属的人审 MCP tool。
 - 飞书、Telegram 等 gateway 集成不属于 MVP 范围。
 

@@ -457,11 +457,19 @@ Default if blank: Do not execute.`;
 function classifyPlanExecutionApproval(answer: string | undefined): PlanExecutionApprovalDecision {
   const normalized = answer?.trim().toLowerCase() ?? "";
   if (!normalized) return "deny";
-  if (/^(1|approve|approved|yes|y)\b/.test(normalized) || normalized.includes("approve execution")) {
-    return "approve";
-  }
-  if (/^(2|deny|no|n|stop)\b/.test(normalized) || normalized.includes("do not execute")) {
+  if (
+    /^(2|deny|no|n|stop)\b/.test(normalized) ||
+    normalized.includes("do not execute") ||
+    /不批准|不同意|不允许|不要执行|不执行|停止|暂不执行|拒绝/.test(normalized)
+  ) {
     return "deny";
+  }
+  if (
+    /^(1|approve|approved|yes|y)\b/.test(normalized) ||
+    normalized.includes("approve execution") ||
+    /批准|同意|允许|可以执行|开始执行|继续执行|执行计划/.test(normalized)
+  ) {
+    return "approve";
   }
   return "modify";
 }

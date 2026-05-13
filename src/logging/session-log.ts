@@ -255,7 +255,6 @@ function formatResult(params: {
   finalResultPath: string;
 }): string {
   const relativeResultPath = path.relative(params.workspace, params.resultPath);
-  const relativeFinalResultPath = path.relative(params.workingDirectory, params.finalResultPath);
   return `# MASPL Result
 
 ## Current Working Directory
@@ -274,7 +273,7 @@ ${params.resultPath}
 ${params.body.trim() || "(no final output)"}
 
 ## How To Use Or Verify
-Use the files, paths, and commands described in "Output And Usage" above. The final result document is stored at \`${relativeFinalResultPath}\` relative to the current working directory. MASPL also keeps an internal run copy at \`${relativeResultPath}\` inside the artifact workspace.
+Use the files, paths, and commands described in "Output And Usage" above. The final result document is stored at \`${path.relative(params.workspace, params.finalResultPath)}\` inside the MASPL workspace. MASPL also keeps an internal run copy at \`${relativeResultPath}\` inside the run directory.
 `;
 }
 

@@ -125,13 +125,13 @@ Agents run in the directory where you start `maspl run`. MASPL writes run state 
 <workspace>/.maspl/runs/<run-id>/result.md
 ```
 
-The model's final conclusion document is also written to the current directory:
+The model's final conclusion document is also written to the MASPL artifact workspace root:
 
 ```text
-./result.md
+<workspace>/result.md
 ```
 
-`result.md` should explain what was produced, where it lives in the current directory, and how to use or verify it.
+`result.md` should explain what was produced, where it lives in the working directory or artifact workspace, and how to use or verify it.
 
 `agent-sessions.json` records the per-agent backend session ids for the run. Different agents cannot share the same session id.
 
