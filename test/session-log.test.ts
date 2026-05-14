@@ -55,9 +55,10 @@ describe("createSessionLog", () => {
     expect(content).toContain("Orchestrator Agent -> Review Agent");
     expect(content).toContain("- [");
     expect(content).toContain("]-[Orchestrator Agent]-[handoff]-[Orchestrator Agent -> Review Agent]");
-    expect(content).toMatch(/- \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z\]-\[Orchestrator Agent\]/);
+    expect(content).toMatch(/- \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\+08:00\]-\[Orchestrator Agent\]/);
     expect(content).not.toMatch(/- \[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\]/);
-    expect(content).toMatch(/- time: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z/);
+    expect(content).not.toMatch(/- \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z\]/);
+    expect(content).toMatch(/- time: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\+08:00/);
     expect(content).toContain("[compressed: omitted");
     expect(content).toContain("````");
 
@@ -162,5 +163,69 @@ describe("createSessionLog", () => {
     const content = await readFile(log.path, "utf8");
     expect(content).toContain("Codex turn started.");
     expect(content).toContain("Claude system event: init");
+  });
+
+  it("prints Runtime error summaries in realtime output", async () => {
+    await mkdir(workspace, { recursive: true });
+    const log = await createSessionLog({
+      workspace,
+      goal: "foreground errors",
+      runId: "foreground-error-test"
+    });
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    let lines: string[] = [];
+
+    try {
+      await log.appendTrace({
+        agent: "Runtime",
+        phase: "error",
+        status: "failed",
+        summary: "Runtime blocked EXECUTE_APPROVED_PLAN. Human approval is required after Judge SATISFIED.",
+        input: "EXECUTE_APPROVED_PLAN: run"
+      });
+      lines = consoleLog.mock.calls.map((call) => String(call[0]));
+    } finally {
+      consoleLog.mockRestore();
+    }
+
+    expect(lines).toEqual([
+      expect.stringContaining(
+        "]-[Runtime]-[error]-[Runtime blocked EXECUTE_APPROVED_PLAN. Human approval is required after Judge SATISFIED.]"
+      )
+    ]);
+    expect(lines[0]).toMatch(/^\- \[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\+08:00\]/);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("Runtime blocked EXECUTE_APPROVED_PLAN");
+    expect(content).toContain("EXECUTE_APPROVED_PLAN: run");
+  });
+
+  it("does not omit short realtime previews", async () => {
+    await mkdir(workspace, { recursive: true });
+    const log = await createSessionLog({
+      workspace,
+      goal: "short preview",
+      runId: "short-preview-test"
+    });
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const shortInput = `Review output ${"x".repeat(134)} done.`;
+    let lines: string[] = [];
+
+    try {
+      await log.appendTrace({
+        agent: "Runtime",
+        phase: "input",
+        status: "running",
+        summary: "Runtime received short input.",
+        input: shortInput
+      });
+      lines = consoleLog.mock.calls.map((call) => String(call[0]));
+    } finally {
+      consoleLog.mockRestore();
+    }
+
+    const inputLine = lines.find((line) => line.includes("]-[Runtime]-[input]-[")) ?? "";
+    expect(inputLine).toContain(shortInput);
+    expect(inputLine).not.toContain("[omitted");
   });
 });

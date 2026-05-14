@@ -45,6 +45,7 @@ export type SessionLog = {
 };
 
 const maxInlineChars = 3_000;
+const minOmittedChars = 200;
 
 export async function createSessionLog(params: {
   workspace: string;
@@ -344,7 +345,7 @@ function formatBracketLines(entry: AgentTraceEntry): string[] {
   }
 
   if (entry.status === "failed" || entry.phase === "error") {
-    lines.push(formatBracketLine(time, entry.agent, entry.phase, "error"));
+    lines.push(formatBracketLine(time, entry.agent, "error", entry.summary));
   }
 
   if (lines.length === 0) {
@@ -385,7 +386,8 @@ function formatBracketLine(time: Date, agent: string, type: string, message: str
 }
 
 export function formatDisplayTimestamp(date: Date): string {
-  return date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "Z");
+  const shanghaiTime = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+  return `${shanghaiTime.toISOString().replace("T", " ").slice(0, 19)}+08:00`;
 }
 
 function fencedBlock(value: unknown, language = ""): string {
@@ -434,11 +436,12 @@ function toAgentDisplayName(agent: string): string {
 
 function previewValue(value: unknown): string {
   const text = sanitizeInline(typeof value === "string" ? value : safeJsonStringify(value));
-  if (text.length <= 100) {
+  const previewChars = 100;
+  if (text.length <= previewChars + minOmittedChars) {
     return text;
   }
 
-  return `${text.slice(0, 50)}...[omitted ${text.length - 100} chars]...${text.slice(-50)}`;
+  return `${text.slice(0, 50)}...[omitted ${text.length - previewChars} chars]...${text.slice(-50)}`;
 }
 
 function printRealtime(message: string): void {
@@ -446,7 +449,7 @@ function printRealtime(message: string): void {
 }
 
 export function compressText(text: string, maxChars = maxInlineChars): string {
-  if (text.length <= maxChars) {
+  if (text.length <= maxChars + minOmittedChars) {
     return text;
   }
 

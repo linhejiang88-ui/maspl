@@ -286,10 +286,45 @@ describe("runOrchestration", () => {
 
     expect(result).toBe("Stopped after runtime gate.");
     expect(calls.map((call) => call.agent)).toEqual(["orchestrator", "exec", "orchestrator", "orchestrator"]);
-    expect(calls.some((call) => call.task.includes("EXECUTE_APPROVED_PLAN") && call.agent === "exec")).toBe(false);
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(false);
 
     const content = await readFile(log.path, "utf8");
     expect(content).toContain("Runtime blocked EXECUTE_APPROVED_PLAN");
+  });
+
+  it("blocks EXECUTE_APPROVED_PLAN when no PLAN_ONLY plan is active", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-execute-without-plan-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-execute-without-plan-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: implement without planning.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after missing plan gate.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("Stopped after missing plan gate.");
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(false);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("No PLAN_ONLY plan is active");
+    expect(content).toContain("run PLAN_ONLY, Review, Judge, and Human approval");
   });
 
   it("injects clarification requirements into Exec PLAN_ONLY tasks", async () => {
@@ -324,8 +359,43 @@ describe("runOrchestration", () => {
 
     expect(execTask).toContain("Exec PLAN_ONLY protocol");
     expect(execTask).toContain("CLARIFICATION_BLOCKED");
+    expect(execTask).toContain("Do not return PERMISSION_BLOCKED merely because future execution may need");
     expect(execTask).toContain("numbered options with impact");
     expect(execTask).toContain("Default if blank");
+  });
+
+  it("tells Exec PLAN_ONLY to list future API permissions instead of blocking", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-exec-plan-permission-guidance-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-exec-plan-permission-guidance-test" });
+    let execTask = "";
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        if (params.agent === "orchestrator" && !execTask) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: plan an API-backed data processing run.";
+        }
+        if (params.agent === "exec") {
+          execTask = params.task;
+          return "Plan ready with required capabilities listed.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nDone.";
+      }
+    };
+
+    await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(execTask).toContain("required capabilities/approvals in the plan instead");
+    expect(execTask).toContain("Return PERMISSION_BLOCKED in PLAN_ONLY only when the planning step itself");
   });
 
   it("requires clarification for very broad short PLAN_ONLY research goals", async () => {
@@ -399,7 +469,9 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
         if (params.agent === "orchestrator" && calls.length === 1) {
           return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
         }
-        if (params.agent === "exec" && params.task.includes("PLAN_ONLY")) return "Plan ready.";
+        if (params.agent === "exec" && params.task.includes("PLAN_ONLY")) {
+          return "Plan ready.\nStep 1: inspect inputs.\nStep 2: produce the approved artifact.";
+        }
         if (params.agent === "orchestrator" && calls.length === 3) {
           return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
         }
@@ -429,10 +501,74 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
     });
 
     expect(result).toBe("All done.");
-    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(true);
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(true);
     expect(questions).toHaveLength(1);
     expect(questions[0]).toContain("Judge returned SATISFIED");
+    expect(questions[0]).toContain("Approved PLAN_ONLY output:");
+    expect(questions[0]).toContain("Plan ready.\nStep 1: inspect inputs.\nStep 2: produce the approved artifact.");
     expect(questions[0]).toContain("Default if blank: Do not execute.");
+  });
+
+  it("keeps PLAN_ONLY output in approval prompt after Review and Judge retries", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-plan-review-judge-retry-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-plan-review-judge-retry-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+    const questions: string[] = [];
+    const planOutput = "Original PLAN_ONLY output that must survive invalid Review and Judge retries.";
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec" && params.task.includes("PLAN_ONLY")) return planOutput;
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review" && calls.length === 4) return "Looks good.";
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: review\nTASK:\nReview the same PLAN_ONLY proposal again with the required protocol.";
+        }
+        if (params.agent === "review" && calls.length === 6) return validReviewOutput();
+        if (params.agent === "orchestrator" && calls.length === 7) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge" && calls.length === 8) return "SATISFIED";
+        if (params.agent === "orchestrator" && calls.length === 9) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the same reviewed plan again with the required protocol.";
+        }
+        if (params.agent === "judge" && calls.length === 10) {
+          return "SATISFIED\nReason: plan reviewed and acceptable.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after approval prompt.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async (question) => {
+        questions.push(question);
+        return "";
+      }
+    });
+
+    expect(result).toBe("Stopped after approval prompt.");
+    expect(questions).toHaveLength(1);
+    expect(questions[0]).toContain("Approved PLAN_ONLY output:");
+    expect(questions[0]).toContain(planOutput);
+    expect(questions[0]).not.toContain("(no PLAN_ONLY output recorded)");
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).not.toContain("Runtime blocked Review approval");
+    expect(content).toContain("Judge output did not satisfy the required protocol");
   });
 
   it("allows EXECUTE_APPROVED_PLAN after Chinese Human approval", async () => {
@@ -481,7 +617,7 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
 
     expect(result).toBe("All done.");
     expect(questions).toHaveLength(1);
-    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(true);
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(true);
 
     const content = await readFile(log.path, "utf8");
     expect(content).not.toContain("Human approval is required after Judge SATISFIED");
@@ -532,7 +668,7 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
 
     expect(result).toBe("Stopped after human denied execution.");
     expect(questions).toHaveLength(1);
-    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(false);
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(false);
 
     const content = await readFile(log.path, "utf8");
     expect(content).toContain("Human approval is required after Judge SATISFIED");
@@ -580,7 +716,7 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
       });
 
       expect(result).toBe("Stopped after Chinese denial.");
-      expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(false);
+      expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(false);
 
       const content = await readFile(log.path, "utf8");
       expect(content).toContain("Human approval is required after Judge SATISFIED");
@@ -637,7 +773,7 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
     expect(result).toBe("Stopped after human requested plan changes.");
     expect(questions).toHaveLength(1);
     expect(sawModifyFeedback).toBe(true);
-    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(false);
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(false);
   });
 
   it("does not ask for plan execution approval again after the approved plan has executed", async () => {
@@ -695,6 +831,77 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
     expect(calls.filter((call) => call.agent === "judge")).toHaveLength(2);
   });
 
+  it("blocks finalization when Exec silently falls back after API failure during approved execution", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-exec-api-fallback-block-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-exec-api-fallback-block-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+    const questions: string[] = [];
+    let fallbackQuestionAsked = false;
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose an API-backed plan.";
+        }
+        if (params.agent === "exec" && params.task.includes("EXECUTE_APPROVED_PLAN")) {
+          return "API 探测失败：环境无法解析 `modelx-api.shizhi-inc.com`。继续用 `--no-api` 的确定性本地规则生成预测。";
+        }
+        if (params.agent === "exec" && params.task.includes("PLAN_ONLY")) return "Plan requires external API.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") return "Plan is acceptable if API access works.";
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge") return "SATISFIED\nReason: plan is acceptable with API access.";
+        if (params.agent === "orchestrator" && calls.length === 7) {
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: run API-backed prediction.";
+        }
+        if (params.agent === "orchestrator" && calls.length === 9) {
+          return "NEXT_AGENT: done\nTASK:\nIncorrectly finalize after fallback.";
+        }
+        if (params.agent === "orchestrator" && params.task.includes("Human") && fallbackQuestionAsked) {
+          return "NEXT_AGENT: done\nTASK:\nStopped after fallback confirmation.";
+        }
+        if (params.agent === "orchestrator" && params.task.includes("PERMISSION_BLOCKED") && !fallbackQuestionAsked) {
+          fallbackQuestionAsked = true;
+          return "NEXT_AGENT: human\nTASK:\nAPI fallback requires approval.\n1. fix environment and retry\n2. approve --no-api fallback\n3. stop\nDefault if blank: stop";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after fallback confirmation.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      maxTurns: 20,
+      askHuman: async (question) => {
+        questions.push(question);
+        if (questions.length === 1) {
+          return "Approve execution - continue with EXECUTE_APPROVED_PLAN.";
+        }
+        return "stop";
+      }
+    });
+
+    expect(result).toBe("Stopped after fallback confirmation.");
+    expect(questions).toHaveLength(2);
+    expect(questions[1]).toContain("API fallback requires approval");
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("PERMISSION_BLOCKED");
+    expect(content).toContain("unapproved fallback");
+    expect(content).toContain("Runtime blocked finalization");
+  });
+
   it("clears plan approval when Judge rejects the reviewed PLAN_ONLY proposal", async () => {
     const workspace = path.join("/private/tmp", `maspl-loop-plan-gate-judge-reject-${process.pid}`);
     await mkdir(workspace, { recursive: true });
@@ -735,18 +942,19 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
     });
 
     expect(result).toBe("Stopped after rejected plan gate.");
-    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(false);
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(false);
 
     const content = await readFile(log.path, "utf8");
     expect(content).toContain("Runtime blocked EXECUTE_APPROVED_PLAN");
   });
 
-  it("blocks EXECUTE_APPROVED_PLAN when Review gives a generic no-blocking approval", async () => {
-    const workspace = path.join("/private/tmp", `maspl-loop-review-protocol-block-${process.pid}`);
+  it("allows free-form Review feedback after Judge and Human approval pass", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-freeform-review-pass-${process.pid}`);
     await mkdir(workspace, { recursive: true });
     const roles = parseRolesConfig(defaultRolesYaml);
-    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-review-protocol-block-test" });
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-freeform-review-pass-test" });
     const calls: Array<{ agent: string; task: string }> = [];
+    const questions: string[] = [];
 
     const backend: AgentBackend = {
       name: "fake",
@@ -759,15 +967,16 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
         if (params.agent === "orchestrator" && calls.length === 3) {
           return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
         }
-        if (params.agent === "review") return "I agree. No blocking findings.";
+        if (params.agent === "review") return "The plan is narrow enough. Main risk: verify output path after execution.";
         if (params.agent === "orchestrator" && calls.length === 5) {
-          return "NEXT_AGENT: judge\nTASK:\nJudge the incomplete review.";
+          return "NEXT_AGENT: judge\nTASK:\nJudge the free-form review.";
         }
-        if (params.agent === "judge") return "SATISFIED\nReason: review said no blocking findings.";
+        if (params.agent === "judge") return "SATISFIED\nReason: Review identified only a non-blocking verification note.";
         if (params.agent === "orchestrator" && calls.length === 7) {
-          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: incorrectly implement after weak review.";
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: implement after normalized judge decision.";
         }
-        return "NEXT_AGENT: done\nTASK:\nStopped after review protocol gate.";
+        if (params.agent === "exec" && params.task.includes("EXECUTE_APPROVED_PLAN")) return "Implemented.";
+        return "NEXT_AGENT: done\nTASK:\nAll done.";
       }
     };
 
@@ -777,18 +986,21 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
       workspace,
       roles,
       log,
-      askHuman: async () => "unused"
+      askHuman: async (question) => {
+        questions.push(question);
+        return "Approve execution - continue with EXECUTE_APPROVED_PLAN.";
+      }
     });
 
-    expect(result).toBe("Stopped after review protocol gate.");
-    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(false);
+    expect(result).toBe("All done.");
+    expect(questions).toHaveLength(1);
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(true);
 
     const content = await readFile(log.path, "utf8");
-    expect(content).toContain("Review output did not satisfy the required protocol");
-    expect(content).toContain("Missing sections");
+    expect(content).not.toContain("Runtime blocked Review approval");
   });
 
-  it("injects the required skeptic checklist into Review tasks", async () => {
+  it("injects free-form skeptic guidance into Review tasks", async () => {
     const workspace = path.join("/private/tmp", `maspl-loop-review-checklist-${process.pid}`);
     await mkdir(workspace, { recursive: true });
     const roles = parseRolesConfig(defaultRolesYaml);
@@ -818,19 +1030,18 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
       askHuman: async () => "unused"
     });
 
-    expect(reviewTask).toContain("Review protocol for this turn");
+    expect(reviewTask).toContain("Review guidance for this turn");
     expect(reviewTask).toContain("Do not merely agree with Exec");
-    expect(reviewTask).toContain("PROBLEM_FRAMING");
-    expect(reviewTask).toContain("CHALLENGE_CASES");
-    expect(reviewTask).toContain("VALIDATION_CASES");
-    expect(reviewTask).toContain("BLOCKING_FINDINGS");
+    expect(reviewTask).toContain("You may write naturally");
+    expect(reviewTask).toContain("ready for Judge");
+    expect(reviewTask).not.toContain("BLOCKING_FINDINGS");
   });
 
-  it("blocks EXECUTE_APPROVED_PLAN when Review has blocking findings", async () => {
-    const workspace = path.join("/private/tmp", `maspl-loop-review-blocking-findings-${process.pid}`);
+  it("blocks Review approval that treats offline metrics as overall_metric acceptance evidence", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-review-offline-metric-block-${process.pid}`);
     await mkdir(workspace, { recursive: true });
     const roles = parseRolesConfig(defaultRolesYaml);
-    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-review-blocking-findings-test" });
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-review-offline-metric-block-test" });
     const calls: Array<{ agent: string; task: string }> = [];
 
     const backend: AgentBackend = {
@@ -838,24 +1049,23 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
       async runAgent(params: AgentRunParams) {
         calls.push({ agent: params.agent, task: params.task });
         if (params.agent === "orchestrator" && calls.length === 1) {
-          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: optimize overall_metric >= 0.9.";
         }
         if (params.agent === "exec") return "Plan ready.";
         if (params.agent === "orchestrator" && calls.length === 3) {
-          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+          return "NEXT_AGENT: review\nTASK:\nReview the execution result. 不要调用真实 API。";
         }
-        if (params.agent === "review") return validReviewOutput("Validation command is missing.");
+        if (params.agent === "review") {
+          return "REVIEW_RESULT\nVerdict: APPROVE\nFindings: offline --no-api validation passes; 目标为 overall_metric >= 0.9。不要调用真实 API。";
+        }
         if (params.agent === "orchestrator" && calls.length === 5) {
           return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
         }
-        if (params.agent === "judge") {
-          return `SATISFIED
-Reason: incorrect, review still has blocking findings.`;
-        }
+        if (params.agent === "judge") return "SATISFIED\nReason: incorrectly accepted offline metric evidence.";
         if (params.agent === "orchestrator" && calls.length === 7) {
-          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: incorrectly implement despite review findings.";
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: must remain blocked.";
         }
-        return "NEXT_AGENT: done\nTASK:\nStopped after review blocking findings gate.";
+        return "NEXT_AGENT: done\nTASK:\nStopped after invalid metric evidence.";
       }
     };
 
@@ -868,18 +1078,279 @@ Reason: incorrect, review still has blocking findings.`;
       askHuman: async () => "unused"
     });
 
-    expect(result).toBe("Stopped after review blocking findings gate.");
-    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(false);
+    expect(result).toBe("Stopped after invalid metric evidence.");
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(false);
 
     const content = await readFile(log.path, "utf8");
-    expect(content).toContain("BLOCKING_FINDINGS must be exactly none");
+    expect(content).toContain("VALIDATION_BLOCKED");
+    expect(content).toContain("real external API against the full eval set");
   });
 
-  it("blocks Review approval when challenge or validation cases are placeholders", async () => {
-    const workspace = path.join("/private/tmp", `maspl-loop-review-weak-cases-${process.pid}`);
+  it("blocks Exec execution output that reports offline metric success", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-exec-offline-metric-block-${process.pid}`);
     await mkdir(workspace, { recursive: true });
     const roles = parseRolesConfig(defaultRolesYaml);
-    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-review-weak-cases-test" });
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-exec-offline-metric-block-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+    let executionDispatched = false;
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: optimize overall_metric >= 0.9.";
+        }
+        if (params.agent === "exec" && params.taskInstruction?.startsWith("PLAN_ONLY")) return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") return "Plan is narrow and validation requires full eval.";
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge") return "SATISFIED\nReason: plan reviewed and acceptable.";
+        if (params.agent === "orchestrator" && !executionDispatched && params.task.includes("Human approved")) {
+          executionDispatched = true;
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: run full eval.";
+        }
+        if (params.agent === "exec" && params.taskInstruction?.startsWith("EXECUTE_APPROVED_PLAN")) {
+          return "Result: overall_metric=0.93 using offline --no-api local-rule eval.";
+        }
+        if (params.agent === "orchestrator" && calls.length === 10) {
+          return "NEXT_AGENT: done\nTASK:\nStopped after invalid Exec metric evidence.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after invalid Exec metric evidence.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "approve"
+    });
+
+    expect(result).toBe("Stopped after invalid Exec metric evidence.");
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("VALIDATION_BLOCKED");
+    expect(content).toContain("overall_metric/F1/eval target");
+    expect(content).toContain("overall_metric=0.93");
+  });
+
+  it("blocks non-explicit Review continuation when offline metrics are the evidence", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-review-ready-offline-metric-block-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({
+      workspace,
+      goal: "test",
+      runId: "loop-review-ready-offline-metric-block-test"
+    });
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: optimize overall_metric >= 0.9.";
+        }
+        if (params.agent === "exec") return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the execution result.";
+        }
+        if (params.agent === "review") {
+          return "离线指标 overall_metric 0.93；未调用真实 API；建议继续交给 Judge。";
+        }
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: done\nTASK:\nStopped after weak metric evidence.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after weak metric evidence.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("Stopped after weak metric evidence.");
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("VALIDATION_BLOCKED");
+    expect(content).toContain("离线指标 overall_metric 0.93");
+  });
+
+  it("blocks metric success that is only estimated or analyzed", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-estimated-metric-block-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-estimated-metric-block-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+    let executionDispatched = false;
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: optimize overall_metric >= 0.9.";
+        }
+        if (params.agent === "exec" && params.taskInstruction?.startsWith("PLAN_ONLY")) return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") return "Plan is acceptable if the metric is actually computed.";
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge") return "SATISFIED\nReason: plan reviewed and acceptable.";
+        if (params.agent === "orchestrator" && !executionDispatched && params.task.includes("Human approved")) {
+          executionDispatched = true;
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: run full eval.";
+        }
+        if (params.agent === "exec" && params.taskInstruction?.startsWith("EXECUTE_APPROVED_PLAN")) {
+          return "分析认为模型优化后 overall_metric=0.93，预计可以达到 0.9 目标。";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after estimated metric evidence.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "approve"
+    });
+
+    expect(result).toBe("Stopped after estimated metric evidence.");
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("VALIDATION_BLOCKED");
+    expect(content).toContain("actually computed");
+    expect(content).toContain("分析认为模型优化后 overall_metric=0.93");
+  });
+
+  it("does not block legacy-shaped Review feedback before Judge normalization", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-review-legacy-freeform-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-review-legacy-freeform-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+    const questions: string[] = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec") return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the plan using ISSUES, RECOMMENDATIONS, and READY_FOR_JUDGE.";
+        }
+        if (params.agent === "review" && calls.length === 4) {
+          return "ISSUES:\nNo blocking issues.\nRECOMMENDATIONS:\nProceed after Judge normalizes.\nREADY_FOR_JUDGE: yes";
+        }
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge") return "SATISFIED\nReason: Judge normalized the free-form review.";
+        return "NEXT_AGENT: done\nTASK:\nStopped after Judge normalization.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async (question) => {
+        questions.push(question);
+        return "";
+      }
+    });
+
+    expect(result).toBe("Stopped after Judge normalization.");
+    expect(questions).toHaveLength(1);
+    expect(questions[0]).toContain("Approved PLAN_ONLY output:");
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).not.toContain("Runtime blocked Review approval");
+    expect(content).not.toContain("Received legacy Review protocol fields");
+  });
+
+  it.each(["无", "没有阻塞问题", "no blocking findings", "no blockers"])(
+    "allows Review no-blocker value %s",
+    async (blockingFindings) => {
+      const workspace = path.join("/private/tmp", `maspl-loop-review-no-blocker-value-${process.pid}-${blockingFindings}`);
+      await mkdir(workspace, { recursive: true });
+      const roles = parseRolesConfig(defaultRolesYaml);
+      const log = await createSessionLog({
+        workspace,
+        goal: "test",
+        runId: `loop-review-no-blocker-value-${blockingFindings}`
+      });
+      const calls: Array<{ agent: string; task: string }> = [];
+      const questions: string[] = [];
+
+      const backend: AgentBackend = {
+        name: "fake",
+        async runAgent(params: AgentRunParams) {
+          calls.push({ agent: params.agent, task: params.task });
+          if (params.agent === "orchestrator" && calls.length === 1) {
+            return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+          }
+          if (params.agent === "exec") return "Plan ready.";
+          if (params.agent === "orchestrator" && calls.length === 3) {
+            return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+          }
+          if (params.agent === "review") return validReviewOutput(blockingFindings);
+          if (params.agent === "orchestrator" && calls.length === 5) {
+            return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+          }
+          if (params.agent === "judge") return "SATISFIED\nReason: Review reported no blockers.";
+          return "NEXT_AGENT: done\nTASK:\nStopped after accepted Review.";
+        }
+      };
+
+      const result = await runOrchestration({
+        backend,
+        goal: "test",
+        workspace,
+        roles,
+        log,
+        askHuman: async (question) => {
+          questions.push(question);
+          return "";
+        }
+      });
+
+      expect(result).toBe("Stopped after accepted Review.");
+      expect(questions).toHaveLength(1);
+
+      const content = await readFile(log.path, "utf8");
+      expect(content).not.toContain("Runtime blocked Review approval");
+    }
+  );
+
+  it("does not count Review CLARIFICATION_BLOCKED as a completed plan review", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-review-clarification-block-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-review-clarification-block-test" });
     const calls: Array<{ agent: string; task: string }> = [];
 
     const backend: AgentBackend = {
@@ -894,25 +1365,16 @@ Reason: incorrect, review still has blocking findings.`;
           return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
         }
         if (params.agent === "review") {
-          return `PROBLEM_FRAMING:
-Frame the problem.
-SCOPE_REDUCTION:
-Reduce the scope.
-MUST_HAVE:
-Must implement.
-NICE_TO_HAVE:
-Nice polish.
-OUT_OF_SCOPE:
-Other work.
-ASSUMPTIONS_OR_CLARIFICATIONS:
-No blocking clarification.
-CHALLENGE_CASES:
-ok
-VALIDATION_CASES:
-pass
-BLOCKING_FINDINGS: none`;
+          return "CLARIFICATION_BLOCKED\nQuestion: Which user segment should this optimize for?\nOptions:\n1. teachers\n2. parents\nDefault if blank: teachers";
         }
-        return "NEXT_AGENT: done\nTASK:\nStopped after weak review gate.";
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge despite missing clarification.";
+        }
+        if (params.agent === "judge") return "SATISFIED\nReason: incorrectly ignored Review clarification.";
+        if (params.agent === "orchestrator" && calls.length === 7) {
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: must remain blocked.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after Review clarification block.";
       }
     };
 
@@ -925,10 +1387,114 @@ BLOCKING_FINDINGS: none`;
       askHuman: async () => "unused"
     });
 
-    expect(result).toBe("Stopped after weak review gate.");
+    expect(result).toBe("Stopped after Review clarification block.");
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(false);
 
     const content = await readFile(log.path, "utf8");
-    expect(content).toContain("Weak sections: CHALLENGE_CASES, VALIDATION_CASES");
+    expect(content).toContain("CLARIFICATION_BLOCKED");
+    expect(content).toContain("Runtime blocked EXECUTE_APPROVED_PLAN");
+  });
+
+  it("blocks EXECUTE_APPROVED_PLAN when Judge normalizes Review risks as NOT_SATISFIED", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-judge-normalizes-review-risk-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-judge-normalizes-review-risk-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec") return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") {
+          return "I see a blocking risk: the plan never says how to validate the generated artifact path.";
+        }
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge") {
+          return `NOT_SATISFIED
+Reason: Review identified an unresolved validation risk.
+Modification direction: Add artifact-path validation before execution.
+Instruction to Orchestrator: Send the plan back to Exec in PLAN_ONLY mode with the validation requirement.`;
+        }
+        if (params.agent === "orchestrator" && calls.length === 7) {
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: incorrectly implement despite review findings.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after Judge rejected the reviewed plan.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("Stopped after Judge rejected the reviewed plan.");
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(false);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).not.toContain("Runtime blocked Review approval");
+    expect(content).toContain("Runtime blocked EXECUTE_APPROVED_PLAN");
+  });
+
+  it("lets Judge request a more concrete Review when free-form Review is too vague", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-review-too-vague-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-review-too-vague-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec") return "Plan ready.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") return "Looks okay.";
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the vague review.";
+        }
+        if (params.agent === "judge") {
+          return `NOT_SATISFIED
+Reason: Review feedback is too vague to support a safe decision.
+Modification direction: Ask Review for concrete risks and validation ideas.
+Instruction to Orchestrator: Dispatch Review again with a more concrete review task.`;
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after Judge requested stronger review.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async () => "unused"
+    });
+
+    expect(result).toBe("Stopped after Judge requested stronger review.");
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).not.toContain("Runtime blocked Review approval");
+    expect(content).toContain("Review feedback is too vague");
   });
 
   it("blocks EXECUTE_APPROVED_PLAN when Judge returns SATISFIED without a reason", async () => {
@@ -971,7 +1537,7 @@ BLOCKING_FINDINGS: none`;
     });
 
     expect(result).toBe("Stopped after judge protocol gate.");
-    expect(calls.some((call) => call.agent === "exec" && call.task.includes("EXECUTE_APPROVED_PLAN"))).toBe(false);
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(false);
 
     const content = await readFile(log.path, "utf8");
     expect(content).toContain("Judge output did not satisfy the required protocol");
@@ -1198,7 +1764,7 @@ Default if blank: cli`;
       async runAgent(params: AgentRunParams) {
         calls.push({ agent: params.agent, task: params.task });
         if (params.agent === "orchestrator" && calls.length === 1) {
-          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: write protected file.";
+          return "NEXT_AGENT: exec\nTASK:\nWrite protected file.";
         }
         if (params.agent === "exec") {
           throw new Error("permission denied: write protected file requires approval");
@@ -1251,4 +1817,8 @@ Check an edge case that could falsify the plan.
 VALIDATION_CASES:
 Run the relevant automated or manual verification command.
 BLOCKING_FINDINGS: ${blockingFindings}`;
+}
+
+function isExecExecuteApprovedPlanCall(call: { agent: string; task: string }): boolean {
+  return call.agent === "exec" && /Task from Orchestrator:\s*\nEXECUTE_APPROVED_PLAN\b/.test(call.task);
 }
