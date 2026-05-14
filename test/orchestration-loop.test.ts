@@ -442,7 +442,7 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
       log,
       askHuman: async (question) => {
         questions.push(question);
-        return "";
+        return "1";
       }
     });
 
@@ -481,7 +481,7 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
         }
         if (params.agent === "judge") return "SATISFIED\nReason: plan reviewed and acceptable.";
         if (params.agent === "orchestrator" && calls.length === 7) {
-          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: implement the reviewed plan.";
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN：implement the reviewed plan.";
         }
         if (params.agent === "exec" && params.task.includes("EXECUTE_APPROVED_PLAN")) return "Implemented.";
         return "NEXT_AGENT: done\nTASK:\nAll done.";
@@ -506,7 +506,7 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
     expect(questions[0]).toContain("Judge returned SATISFIED");
     expect(questions[0]).toContain("Approved PLAN_ONLY output:");
     expect(questions[0]).toContain("Plan ready.\nStep 1: inspect inputs.\nStep 2: produce the approved artifact.");
-    expect(questions[0]).toContain("Default if blank: Do not execute.");
+    expect(questions[0]).toContain("Default if blank: Approve execution.");
   });
 
   it("keeps PLAN_ONLY output in approval prompt after Review and Judge retries", async () => {
@@ -525,7 +525,7 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
         if (params.agent === "orchestrator" && calls.length === 1) {
           return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
         }
-        if (params.agent === "exec" && params.task.includes("PLAN_ONLY")) return planOutput;
+        if (params.agent === "exec" && params.taskInstruction?.startsWith("PLAN_ONLY")) return planOutput;
         if (params.agent === "orchestrator" && calls.length === 3) {
           return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
         }
@@ -556,7 +556,7 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
       log,
       askHuman: async (question) => {
         questions.push(question);
-        return "";
+        return "Do not execute - stop after the approved plan.";
       }
     });
 
@@ -598,7 +598,7 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
         if (params.agent === "orchestrator" && calls.length === 7) {
           return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: implement the reviewed plan.";
         }
-        if (params.agent === "exec" && params.task.includes("EXECUTE_APPROVED_PLAN")) return "Implemented.";
+        if (params.agent === "exec" && params.taskInstruction?.startsWith("EXECUTE_APPROVED_PLAN")) return "Implemented.";
         return "NEXT_AGENT: done\nTASK:\nAll done.";
       }
     };
@@ -617,6 +617,66 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
 
     expect(result).toBe("All done.");
     expect(questions).toHaveLength(1);
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(true);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).not.toContain("Human approval is required after Judge SATISFIED");
+  });
+
+  it("replaces Orchestrator custom Human execution approval with the Runtime approval gate", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-runtime-owned-approval-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-runtime-owned-approval-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+    const questions: string[] = [];
+    const planOutput = "PLAN_ONLY: approved plan\n1. Run the full eval.\n2. Report the computed metric.";
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec" && params.task.includes("PLAN_ONLY")) return planOutput;
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") return validReviewOutput();
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge") return "SATISFIED\nReason: plan reviewed and acceptable.";
+        if (params.agent === "orchestrator" && calls.length === 7) {
+          return "NEXT_AGENT: human\nTASK:\n请确认是否批准执行。\n1. 批准执行\n2. 暂不执行\nDefault if blank: 1";
+        }
+        if (params.agent === "orchestrator" && calls.length === 8) {
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN：人类已批准执行。请执行计划。";
+        }
+        if (params.agent === "exec" && params.task.includes("EXECUTE_APPROVED_PLAN")) return "Implemented.";
+        return "NEXT_AGENT: done\nTASK:\nAll done.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async (question) => {
+        questions.push(question);
+        return "";
+      }
+    });
+
+    expect(result).toBe("All done.");
+    expect(questions).toHaveLength(1);
+    expect(questions[0]).toContain("Approved PLAN_ONLY output:");
+    expect(questions[0]).toContain(planOutput);
+    expect(questions[0]).toContain("Default if blank: Approve execution.");
+    expect(questions[0]).not.toContain("请确认是否批准执行");
     expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(true);
 
     const content = await readFile(log.path, "utf8");
@@ -662,7 +722,7 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
       log,
       askHuman: async (question) => {
         questions.push(question);
-        return "";
+        return "Do not execute - stop after the approved plan.";
       }
     });
 

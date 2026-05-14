@@ -29,7 +29,7 @@ export function createCliAskHuman(): AskHuman {
       const answer = await select({
         message: stripOptions(question),
         options,
-        initialValue: "",
+        initialValue: initialSelectValue(question, options),
         maxItems: options.length
       });
       if (isCancel(answer)) {
@@ -130,6 +130,18 @@ export function formatHumanPrompt(question: string): { text: string; options: st
 export function buildSelectChoices(question: string): SelectChoice[] {
   const options = extractOptions(question);
   if (options.length === 0) return [];
+  if (isPlanExecutionApprovalQuestion(question)) {
+    return [
+      ...options.map((option) => ({
+        value: option,
+        label: option
+      })),
+      {
+        value: customAnswerValue,
+        label: "Other / custom answer"
+      }
+    ];
+  }
   return [
     {
       value: "",
@@ -144,6 +156,13 @@ export function buildSelectChoices(question: string): SelectChoice[] {
       label: "Other / custom answer"
     }
   ];
+}
+
+function initialSelectValue(question: string, options: SelectChoice[]): string {
+  if (isPlanExecutionApprovalQuestion(question)) {
+    return options[0]?.value ?? "";
+  }
+  return "";
 }
 
 export function parseHumanQuestionBlocks(question: string): HumanQuestionBlock[] {
@@ -223,8 +242,16 @@ function optionScopeLines(question: string): string[] {
 }
 
 function optionScopeStartIndex(lines: string[]): number {
-  const markerIndex = lines.findIndex((line) => line.trim() === planExecutionApprovalMarker);
+  const markerIndex = lines.findIndex((line) => isPlanExecutionApprovalMarker(line.trim()));
   return markerIndex >= 0 ? markerIndex + 1 : 0;
+}
+
+function isPlanExecutionApprovalQuestion(question: string): boolean {
+  return question.includes("Approved PLAN_ONLY output:") && question.split(/\r?\n/).some((line) => isPlanExecutionApprovalMarker(line.trim()));
+}
+
+function isPlanExecutionApprovalMarker(line: string): boolean {
+  return line === planExecutionApprovalMarker || /确认.*执行.*approved plan|是否批准.*执行|是否.*开始执行/.test(line);
 }
 
 function isOptionLine(line: string): boolean {

@@ -114,6 +114,24 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
     }
 
     if (dispatch.nextAgent === "human") {
+      if (shouldRequestPlanExecutionApproval(planGate)) {
+        const approvalOutput = await requestPlanExecutionApproval(params, planGate);
+        outputs.push(approvalOutput);
+        planGate.unresolvedRuntimePermissionBlock = false;
+        continue;
+      }
+      if (
+        planGate.humanApprovedPlanVersion === planGate.planVersion &&
+        isPlanExecutionApprovalLikeTask(dispatch.task)
+      ) {
+        outputs.push({
+          agent: "Human",
+          task: dispatch.task,
+          output: "PLAN_EXECUTION_APPROVED: Runtime ignored duplicate Orchestrator execution-approval prompt because the current plan is already approved."
+        });
+        planGate.unresolvedRuntimePermissionBlock = false;
+        continue;
+      }
       const answer = await params.askHuman(dispatch.task);
       outputs.push({
         agent: "Human",
@@ -507,18 +525,26 @@ async function requestPlanExecutionApproval(
 ): Promise<AgentOutput> {
   const question = buildPlanExecutionApprovalQuestion(planGate.planVersion, planGate.planOutput);
   const answer = await params.askHuman(question);
-  const decision = classifyPlanExecutionApproval(answer);
-  if (decision === "approve") {
-    planGate.humanApprovedPlanVersion = planGate.planVersion;
-  } else if (planGate.humanApprovedPlanVersion === planGate.planVersion) {
-    planGate.humanApprovedPlanVersion = undefined;
-  }
+  const decision = applyHumanPlanExecutionApproval(planGate, answer);
 
   return {
     agent: "Human",
     task: question,
     output: formatPlanExecutionApprovalOutput(decision, answer)
   };
+}
+
+function applyHumanPlanExecutionApproval(
+  planGate: PlanGateState,
+  answer: string | undefined
+): PlanExecutionApprovalDecision {
+  const decision = classifyPlanExecutionApproval(answer);
+  if (decision === "approve" && shouldRequestPlanExecutionApproval(planGate)) {
+    planGate.humanApprovedPlanVersion = planGate.planVersion;
+  } else if (decision !== "approve" && planGate.humanApprovedPlanVersion === planGate.planVersion) {
+    planGate.humanApprovedPlanVersion = undefined;
+  }
+  return decision;
 }
 
 type PlanExecutionApprovalDecision = "approve" | "deny" | "modify";
@@ -528,6 +554,12 @@ function shouldRequestPlanExecutionApproval(planGate: PlanGateState): boolean {
     planGate.judgePassed &&
     planGate.judgedPlanVersion === planGate.planVersion &&
     planGate.humanApprovedPlanVersion !== planGate.planVersion
+  );
+}
+
+function isPlanExecutionApprovalLikeTask(task: string): boolean {
+  return /执行批准|批准执行|是否.*执行|execute approved plan|execution approval|approve execution|execute the approved plan/i.test(
+    task
   );
 }
 
@@ -541,12 +573,12 @@ Confirm whether runtime should execute the approved plan.
 1. Approve execution - continue with EXECUTE_APPROVED_PLAN.
 2. Do not execute - stop after the approved plan.
 3. Modify plan/scope - return to PLAN_ONLY with human feedback.
-Default if blank: Do not execute.`;
+Default if blank: Approve execution.`;
 }
 
 function classifyPlanExecutionApproval(answer: string | undefined): PlanExecutionApprovalDecision {
   const normalized = answer?.trim().toLowerCase() ?? "";
-  if (!normalized) return "deny";
+  if (!normalized) return "approve";
   if (
     /^(2|deny|no|n|stop)\b/.test(normalized) ||
     normalized.includes("do not execute") ||
@@ -556,6 +588,8 @@ function classifyPlanExecutionApproval(answer: string | undefined): PlanExecutio
   }
   if (
     /^(1|approve|approved|yes|y)\b/.test(normalized) ||
+    normalized.includes("use default") ||
+    normalized.includes("leave blank") ||
     normalized.includes("approve execution") ||
     /批准|同意|允许|可以执行|开始执行|继续执行|执行计划/.test(normalized)
   ) {
@@ -645,6 +679,9 @@ Planning gate:
 - A PLAN_ONLY output must go to review, then judge.
 - Exec mode opens only after the current PLAN_ONLY plan has been reviewed, Judge returns SATISFIED, and Human approves execution.
 - Do not choose exec with EXECUTE_APPROVED_PLAN until all three conditions are true.
+- After Judge returns SATISFIED for PLAN_ONLY, do not choose NEXT_AGENT: human to ask
+  your own execution-approval question. Runtime owns that approval gate, will show
+  the approved PLAN_ONLY output, and will record the internal approval state.
 - If Human does not approve execution after Judge SATISFIED, finish with the approved plan or return to PLAN_ONLY with the human feedback.
 - If judge rejects the plan, send the requested plan improvements back to exec in PLAN_ONLY mode.
 - For narrow deterministic goals, direct execution is allowed, but review should still define or run concrete validation.
