@@ -1254,6 +1254,64 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
     expect(content).toContain("real external API against the full eval set");
   });
 
+  it("allows PLAN_ONLY review approval that discusses metric targets without claiming achievement", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-plan-review-metric-discussion-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({
+      workspace,
+      goal: "test",
+      runId: "loop-plan-review-metric-discussion-test"
+    });
+    const calls: Array<{ agent: string; task: string }> = [];
+    const questions: string[] = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: revise the eval plan for F1 >= 0.9.";
+        }
+        if (params.agent === "exec") {
+          return "PLAN_ONLY_RESULT: Run the real API full eval later; do not claim F1 >= 0.9 until computed.";
+        }
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\n请审查 Exec Agent 修订后的 PLAN_ONLY 输出。如果 APPROVED，请明确说明该修订 PLAN_ONLY 可进入 Judge Agent 审核。";
+        }
+        if (params.agent === "review") {
+          return "审查结论：APPROVED。该修订 PLAN_ONLY 可进入 Judge Agent 审核。它只规定后续必须运行真实 API full eval 来证明 combined micro-F1 是否达到 >= 0.9，不声称 F1 已达成；剩余风险只能通过聚合 F1 体现影响，这是防泄漏约束下可接受的风险。";
+        }
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the revised PLAN_ONLY.";
+        }
+        if (params.agent === "judge") {
+          return "SATISFIED\nReason: Review approved the plan and the plan does not assert metric achievement.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped after Runtime approval prompt.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async (question) => {
+        questions.push(question);
+        return "Do not execute - stop after the approved plan.";
+      }
+    });
+
+    expect(result).toBe("Stopped after Runtime approval prompt.");
+    expect(questions).toHaveLength(1);
+    expect(questions[0]).toContain("Approved PLAN_ONLY output:");
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).not.toContain("VALIDATION_BLOCKED");
+  });
+
   it("blocks Exec execution output that reports offline metric success", async () => {
     const workspace = path.join("/private/tmp", `maspl-loop-exec-offline-metric-block-${process.pid}`);
     await mkdir(workspace, { recursive: true });

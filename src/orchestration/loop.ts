@@ -453,6 +453,10 @@ Required approval: Ask the human whether to fix the environment and retry, appro
 }
 
 function validateMetricEvidenceClaim(dispatch: Dispatch, output: string | undefined): string | undefined {
+  if (dispatch.nextAgent === "review" && isPlanOnlyReviewTask(dispatch.task)) {
+    return undefined;
+  }
+
   if (
     dispatch.nextAgent !== "review" &&
     dispatch.nextAgent !== "judge" &&
@@ -487,6 +491,10 @@ function usesUncomputedMetricEvidence(text: string): boolean {
   return /分析(?:认为|估计|判断)?|估算|预估|预测|预计|预期|推测|大概|约(?:为|等于)?|理论上|应(?:该|能|可)|可能(?:达到|为)|expected|estimate[sd]?|estimated|predict(?:ed|ion)?|projected|approximately|around|about|should\s+(?:reach|be|pass)|likely\s+(?:reach|be|pass)/i.test(
     text
   );
+}
+
+function isPlanOnlyReviewTask(task: string): boolean {
+  return /\bPLAN_ONLY\b|PLAN_ONLY_RESULT/.test(task);
 }
 
 function explicitlyRejectsMetricEvidence(text: string): boolean {
