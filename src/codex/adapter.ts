@@ -16,6 +16,7 @@ type CodexThread = {
 type CodexThreadState = {
   thread: CodexThread;
   sandboxMode: "read-only" | "workspace-write";
+  networkAccessEnabled: boolean;
 };
 
 export function createCodexBackend(sdkOverride?: CodexSdkModule): AgentBackend {
@@ -31,14 +32,15 @@ export function createCodexBackend(sdkOverride?: CodexSdkModule): AgentBackend {
   async function getThread(params: CodexAgentRunParams): Promise<CodexThread> {
     const sandboxMode = sandboxForAgent(params);
     const existing = threads.get(params.agent);
+    const networkAccessEnabled = networkAccessForAgent(params);
     if (existing) {
-      if (existing.sandboxMode === sandboxMode) {
+      if (existing.sandboxMode === sandboxMode && existing.networkAccessEnabled === networkAccessEnabled) {
         return existing.thread;
       }
 
       if (existing.thread.id && codex?.resumeThread) {
         const resumed = codex.resumeThread(existing.thread.id, threadOptionsForAgent(params, sandboxMode));
-        threads.set(params.agent, { thread: resumed, sandboxMode });
+        threads.set(params.agent, { thread: resumed, sandboxMode, networkAccessEnabled });
         return resumed;
       }
 
@@ -48,7 +50,7 @@ export function createCodexBackend(sdkOverride?: CodexSdkModule): AgentBackend {
     const sdk = params.sdk ?? (await getSdk());
     codex ??= new sdk.Codex();
     const thread = codex.startThread(threadOptionsForAgent(params, sandboxMode));
-    threads.set(params.agent, { thread, sandboxMode });
+    threads.set(params.agent, { thread, sandboxMode, networkAccessEnabled });
     return thread;
   }
 
@@ -80,6 +82,7 @@ async function runCodexAgent(
       skipGitRepoCheck: true,
       sandboxMode: sandboxForAgent(params),
       approvalPolicy: "on-request",
+      networkAccessEnabled: networkAccessForAgent(params),
       model: normalizeModel(roleFor(params).model),
       maxTurns
     });
@@ -301,7 +304,7 @@ function threadOptionsForAgent(
     sandboxMode,
     approvalPolicy: "on-request",
     model: normalizeModel(roleFor(params).model),
-    networkAccessEnabled: false
+    networkAccessEnabled: networkAccessForAgent(params)
   };
 }
 
@@ -309,7 +312,14 @@ function sandboxForAgent(params: Pick<CodexAgentRunParams, "agent" | "task" | "t
   if (isExecPlanOnly(params)) {
     return "read-only";
   }
-  return params.agent === "exec" ? "workspace-write" : "read-only";
+  return params.agent === "exec" || params.agent === "review" ? "workspace-write" : "read-only";
+}
+
+function networkAccessForAgent(params: Pick<CodexAgentRunParams, "agent" | "task" | "taskInstruction">): boolean {
+  if (params.agent === "review") {
+    return true;
+  }
+  return params.agent === "exec" && !isExecPlanOnly(params);
 }
 
 function isExecPlanOnly(params: Pick<CodexAgentRunParams, "agent" | "task" | "taskInstruction">): boolean {

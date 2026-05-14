@@ -19,33 +19,13 @@ type AgentOutput = {
 type PlanGateState = {
   hasPlan: boolean;
   planVersion: number;
+  planOutput: string | undefined;
   reviewedPlanVersion: number | undefined;
   judgedPlanVersion: number | undefined;
   humanApprovedPlanVersion: number | undefined;
   reviewPassed: boolean;
   judgePassed: boolean;
-};
-
-const reviewProtocolSections = [
-  "PROBLEM_FRAMING",
-  "SCOPE_REDUCTION",
-  "MUST_HAVE",
-  "NICE_TO_HAVE",
-  "OUT_OF_SCOPE",
-  "ASSUMPTIONS_OR_CLARIFICATIONS",
-  "CHALLENGE_CASES",
-  "VALIDATION_CASES",
-  "BLOCKING_FINDINGS"
-] as const;
-
-type ReviewProtocolSection = (typeof reviewProtocolSections)[number];
-
-type ReviewValidation = {
-  passed: boolean;
-  missing: ReviewProtocolSection[];
-  empty: ReviewProtocolSection[];
-  weak: ReviewProtocolSection[];
-  hasNoBlockingFindings: boolean;
+  unresolvedRuntimePermissionBlock: boolean;
 };
 
 type JudgeDecision = "SATISFIED" | "NOT_SATISFIED" | "NEED_HUMAN";
@@ -76,11 +56,13 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
   const planGate: PlanGateState = {
     hasPlan: false,
     planVersion: 0,
+    planOutput: undefined,
     reviewedPlanVersion: undefined,
     judgedPlanVersion: undefined,
     humanApprovedPlanVersion: undefined,
     reviewPassed: false,
-    judgePassed: false
+    judgePassed: false,
+    unresolvedRuntimePermissionBlock: false
   };
   const maxTurns = params.maxTurns ?? params.roles.runtime.maxTurns;
 
@@ -101,6 +83,24 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
     const dispatch = await requestDispatch(params, outputs, step);
 
     if (dispatch.nextAgent === "done") {
+      if (planGate.unresolvedRuntimePermissionBlock) {
+        const gateBlock =
+          "Runtime blocked finalization because a PERMISSION_BLOCKED execution fallback still needs Human confirmation.";
+        await params.log.appendTrace({
+          agent: "Runtime",
+          phase: "error",
+          status: "failed",
+          summary: gateBlock,
+          input: dispatch.task
+        });
+        outputs.push({
+          agent: "Runtime",
+          task: dispatch.task,
+          output: gateBlock
+        });
+        continue;
+      }
+
       const finalResult = dispatch.task;
       await params.log.appendTrace({
         agent: "Orchestrator Agent",
@@ -120,6 +120,7 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
         task: dispatch.task,
         output: answer
       });
+      planGate.unresolvedRuntimePermissionBlock = false;
       continue;
     }
 
@@ -185,6 +186,8 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
     });
     const gateUpdateMessage =
       validateExecPlanOnlyClarification(params.goal, previousOutputs, dispatch, output) ??
+      validateExecExecutionFallback(dispatch, output) ??
+      validateMetricEvidenceClaim(dispatch, output) ??
       updatePlanGate(planGate, dispatch.nextAgent, dispatch.task, output);
     if (gateUpdateMessage) {
       await params.log.appendTrace({
@@ -200,6 +203,9 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
         task: dispatch.task,
         output: gateUpdateMessage
       });
+      if (gateUpdateMessage.includes("PERMISSION_BLOCKED")) {
+        planGate.unresolvedRuntimePermissionBlock = true;
+      }
     }
 
     await params.log.appendTrace({
@@ -284,6 +290,9 @@ function validatePlanGateDispatch(dispatch: Dispatch, planGate: PlanGateState): 
   }
 
   if (!planGate.hasPlan) {
+    if (isExecuteApprovedPlanTask(dispatch.task)) {
+      return "Runtime blocked EXECUTE_APPROVED_PLAN. No PLAN_ONLY plan is active; run PLAN_ONLY, Review, Judge, and Human approval before executing an approved plan.";
+    }
     return undefined;
   }
 
@@ -297,7 +306,7 @@ function validatePlanGateDispatch(dispatch: Dispatch, planGate: PlanGateState): 
     planGate.reviewedPlanVersion !== planGate.planVersion ||
     planGate.judgedPlanVersion !== planGate.planVersion
   ) {
-    return "Runtime blocked EXECUTE_APPROVED_PLAN. Exec mode opens only after Review reports no blocking findings and Judge returns SATISFIED for the PLAN_ONLY plan.";
+    return "Runtime blocked EXECUTE_APPROVED_PLAN. Exec mode opens only after the current PLAN_ONLY plan has been reviewed, Judge returns SATISFIED, and Human approves execution.";
   }
 
   if (planGate.humanApprovedPlanVersion !== planGate.planVersion) {
@@ -316,11 +325,13 @@ function updatePlanGate(
   if (agent === "exec" && isPlanOnlyTask(task)) {
     planGate.hasPlan = true;
     planGate.planVersion += 1;
+    planGate.planOutput = output;
     planGate.reviewedPlanVersion = undefined;
     planGate.judgedPlanVersion = undefined;
     planGate.humanApprovedPlanVersion = undefined;
     planGate.reviewPassed = false;
     planGate.judgePassed = false;
+    planGate.unresolvedRuntimePermissionBlock = false;
     return undefined;
   }
 
@@ -329,14 +340,13 @@ function updatePlanGate(
   }
 
   if (agent === "review") {
-    const validation = validateReviewOutput(output);
-    planGate.reviewPassed = validation.passed;
-    planGate.reviewedPlanVersion = planGate.reviewPassed ? planGate.planVersion : undefined;
-    if (!planGate.reviewPassed) {
+    const reviewCompleted = !containsHardBlockSignal(output);
+    planGate.reviewPassed = reviewCompleted;
+    planGate.reviewedPlanVersion = reviewCompleted ? planGate.planVersion : undefined;
+    if (!reviewCompleted) {
       planGate.judgePassed = false;
       planGate.judgedPlanVersion = undefined;
       planGate.humanApprovedPlanVersion = undefined;
-      return formatReviewValidationFailure(validation);
     }
     return undefined;
   }
@@ -350,8 +360,6 @@ function updatePlanGate(
       validation.passed;
     planGate.judgedPlanVersion = planGate.judgePassed ? planGate.planVersion : undefined;
     if (!planGate.judgePassed) {
-      planGate.reviewPassed = false;
-      planGate.reviewedPlanVersion = undefined;
       planGate.humanApprovedPlanVersion = undefined;
       if (!validation.passed) {
         return formatJudgeValidationFailure(validation);
@@ -381,6 +389,83 @@ function validateExecPlanOnlyClarification(
   }
 
   return "CLARIFICATION_REQUIRED: Runtime blocked the PLAN_ONLY output because the initial goal is broad or underspecified. Exec must return CLARIFICATION_BLOCKED with a blocking question, numbered options with impact, and Default if blank before producing a concrete plan.";
+}
+
+function validateExecExecutionFallback(dispatch: Dispatch, output: string | undefined): string | undefined {
+  if (dispatch.nextAgent !== "exec" || !isExecuteApprovedPlanTask(dispatch.task)) {
+    return undefined;
+  }
+
+  const text = output ?? "";
+  if (!hasExternalCapabilityFailure(text) || !hasUnapprovedFallbackSignal(text) || hasFallbackApprovalSignal(text)) {
+    return undefined;
+  }
+
+  return `PERMISSION_BLOCKED
+Blocked action: continuing EXECUTE_APPROVED_PLAN with an unapproved fallback after an external capability failure.
+Reason: Exec output indicates an API/DNS/network/dependency failure and then switches to a fallback such as --no-api, local rules, cached/synthetic data, or reduced-scope execution. Runtime requires Human confirmation before changing the approved execution path.
+Required approval: Ask the human whether to fix the environment and retry, approve the fallback, modify scope, or stop.`;
+}
+
+function validateMetricEvidenceClaim(dispatch: Dispatch, output: string | undefined): string | undefined {
+  if (
+    dispatch.nextAgent !== "review" &&
+    dispatch.nextAgent !== "judge" &&
+    !(dispatch.nextAgent === "exec" && isExecuteApprovedPlanTask(dispatch.task))
+  ) {
+    return undefined;
+  }
+
+  const text = output ?? "";
+  if (
+    !claimsMetricTarget(text) ||
+    (!usesOfflineOrNoApiEvidence(text) && !usesUncomputedMetricEvidence(text)) ||
+    explicitlyRejectsMetricEvidence(text)
+  ) {
+    return undefined;
+  }
+
+  return `VALIDATION_BLOCKED: Runtime rejected non-computed or non-production metric evidence for an acceptance threshold. An overall_metric/F1/eval target such as overall_metric >= 0.9 is valid only when it is actually computed by running the real external API against the full eval set. Analysis, estimates, predictions, expected scores, offline, dry-run, --no-api, local-rule, sampled, or fallback metrics may be reported as diagnostics, but they cannot justify completion, APPROVE, or SATISFIED. Re-dispatch Exec/Review/Judge to run the real API full-eval command and cite the produced metric artifact/log, or ask the human to approve a reduced/offline acceptance standard.`;
+}
+
+function claimsMetricTarget(text: string): boolean {
+  return /overall[_ -]?metric|f1|F1|metric\s*[=:>=]|eval(?:uation)?\s*(?:score|metric)?|指标|评测/i.test(text) && /(?:0\.\d+|[1-9]\d(?:\.\d+)?%)/.test(text);
+}
+
+function usesOfflineOrNoApiEvidence(text: string): boolean {
+  return /--no-api|no api|no-api|dry[- ]?run|offline|离线|不要调用真实\s*API|未调用真实\s*API|不调用真实\s*API|本地规则|local rules?|fallback|降级|sampled?|抽样|部分 eval|partial eval/i.test(
+    text
+  );
+}
+
+function usesUncomputedMetricEvidence(text: string): boolean {
+  return /分析(?:认为|估计|判断)?|估算|预估|预测|预计|预期|推测|大概|约(?:为|等于)?|理论上|应(?:该|能|可)|可能(?:达到|为)|expected|estimate[sd]?|estimated|predict(?:ed|ion)?|projected|approximately|around|about|should\s+(?:reach|be|pass)|likely\s+(?:reach|be|pass)/i.test(
+    text
+  );
+}
+
+function explicitlyRejectsMetricEvidence(text: string): boolean {
+  return /\b(?:REVISE|NOT_SATISFIED|NEED_HUMAN|PERMISSION_BLOCKED|CLARIFICATION_BLOCKED|VALIDATION_BLOCKED)\b|不(?:应|能|可|可以)?(?:批准|通过|接受|完成|视为达标)|不能(?:批准|通过|接受|完成|视为达标)|未(?:达标|满足)|不可接受|需要人工|需要真实\s*API|必须(?:运行|调用).{0,20}真实\s*API/i.test(
+    text
+  );
+}
+
+function hasExternalCapabilityFailure(text: string): boolean {
+  return /api_error|api 探测失败|api.*失败|dns|无法解析|解析.*失败|connectionerror|httpsconnectionpool|network|网络|external api|dependency|依赖|credential|凭证|timeout|timed out/i.test(
+    text
+  );
+}
+
+function hasUnapprovedFallbackSignal(text: string): boolean {
+  return /--no-api|fallback|fall back|本地规则|local rules?|deterministic local|cached data|cache|synthetic data|合成数据|降级|继续用|继续使用|reduced-scope|reduced scope/i.test(
+    text
+  );
+}
+
+function hasFallbackApprovalSignal(text: string): boolean {
+  return /fallback (?:was )?(?:explicitly )?approved|approved fallback|human approved fallback|用户.*批准.*fallback|用户.*批准.*降级|已批准.*fallback|已批准.*降级|批准.*--no-api/i.test(
+    text
+  );
 }
 
 function requiresInitialClarification(goal: string, outputs: AgentOutput[]): boolean {
@@ -420,7 +505,7 @@ async function requestPlanExecutionApproval(
   params: RunOrchestrationParams,
   planGate: PlanGateState
 ): Promise<AgentOutput> {
-  const question = buildPlanExecutionApprovalQuestion(planGate.planVersion);
+  const question = buildPlanExecutionApprovalQuestion(planGate.planVersion, planGate.planOutput);
   const answer = await params.askHuman(question);
   const decision = classifyPlanExecutionApproval(answer);
   if (decision === "approve") {
@@ -446,8 +531,13 @@ function shouldRequestPlanExecutionApproval(planGate: PlanGateState): boolean {
   );
 }
 
-function buildPlanExecutionApprovalQuestion(planVersion: number): string {
-  return `Judge returned SATISFIED for PLAN_ONLY version ${planVersion}. Confirm whether runtime should execute the approved plan.
+function buildPlanExecutionApprovalQuestion(planVersion: number, planOutput: string | undefined): string {
+  return `Judge returned SATISFIED for PLAN_ONLY version ${planVersion}. Review the approved plan below before choosing whether to execute it.
+
+Approved PLAN_ONLY output:
+${planOutput?.trim() || "(no PLAN_ONLY output recorded)"}
+
+Confirm whether runtime should execute the approved plan.
 1. Approve execution - continue with EXECUTE_APPROVED_PLAN.
 2. Do not execute - stop after the approved plan.
 3. Modify plan/scope - return to PLAN_ONLY with human feedback.
@@ -553,17 +643,25 @@ Decide:
 Planning gate:
 - For broad, ambiguous, exploratory, high-risk, or multi-step goals, first choose exec with a TASK that starts with PLAN_ONLY.
 - A PLAN_ONLY output must go to review, then judge.
-- Exec mode opens only after Review reports no blocking findings, Judge returns SATISFIED for the PLAN_ONLY plan, and Human approves execution.
+- Exec mode opens only after the current PLAN_ONLY plan has been reviewed, Judge returns SATISFIED, and Human approves execution.
 - Do not choose exec with EXECUTE_APPROVED_PLAN until all three conditions are true.
 - If Human does not approve execution after Judge SATISFIED, finish with the approved plan or return to PLAN_ONLY with the human feedback.
 - If judge rejects the plan, send the requested plan improvements back to exec in PLAN_ONLY mode.
 - For narrow deterministic goals, direct execution is allowed, but review should still define or run concrete validation.
+- Dispatch Review with enough authority to run the validation that correctness requires:
+  local scripts/tests, network/API checks, and full eval commands when they are in scope.
+- Do not tell Review to skip real API/full eval validation when that validation is the
+  acceptance standard. If access is unavailable, route the permission or environment
+  problem to Human instead of downgrading Review.
 
 Blocking gates:
 - If an agent output contains CLARIFICATION_BLOCKED, do not guess or continue the blocked plan.
 - Ask the human with NEXT_AGENT: human and provide concise options plus the blank-input default.
 - If an agent output contains PERMISSION_BLOCKED, do not retry the same action.
 - Ask the human with NEXT_AGENT: human and provide concise options: approve, deny, or modify scope/task.
+- Human approval grants permission for the requested action scope, but does not prove
+  network/API/dependency availability. If the approved action still fails, ask whether
+  to change environment, retry, approve a fallback, or stop; do not silently downgrade.
 - If Judge output starts with NEED_HUMAN, choose NEXT_AGENT: human.
 - The human TASK must include Judge's Question, numbered Options, Default if blank, and option impact details.
 - After human input, dispatch the appropriate agent with the approved scope, clarified decision, or safer alternative.
@@ -585,7 +683,7 @@ function buildAgentTask(
   task: string,
   outputs: AgentOutput[]
 ): string {
-  const reviewProtocol = agent === "review" ? `\n${buildReviewProtocolInstruction()}\n` : "";
+  const reviewProtocol = agent === "review" ? `\n${buildReviewGuidanceInstruction()}\n` : "";
   const judgeProtocol = agent === "judge" ? `\n${buildJudgeProtocolInstruction()}\n` : "";
   const execProtocol = agent === "exec" && isPlanOnlyTask(task) ? `\n${buildExecPlanOnlyInstruction(params.goal, outputs)}\n` : "";
   return `Goal:
@@ -620,6 +718,16 @@ Initial clarification gate:
     : "";
   return `Exec PLAN_ONLY protocol for this turn:
 - Stay read-only and do not implement.
+- Do not return PERMISSION_BLOCKED merely because future execution may need file writes,
+  network access, external APIs, dependency installation, or credentials. List those as
+  required capabilities/approvals in the plan instead.
+- Return PERMISSION_BLOCKED in PLAN_ONLY only when the planning step itself is currently
+  blocked by permissions, sandbox, missing credentials, or read-only access.
+- Keep the plan concise and approval-ready: no more than 800 words or 80 lines.
+- Include only the chosen direction, execution path, expected outputs/files, validation,
+  assumptions, risks, and blocking open questions.
+- Do not include broad background research, long explanations, exhaustive alternatives,
+  or detailed content that belongs in EXECUTE_APPROVED_PLAN.
 - Produce a plan only if the scope, correctness target, acceptance criteria, target environment,
   and validation approach are clear enough.
 - If any missing decision materially changes scope, correctness, acceptance criteria,
@@ -628,23 +736,23 @@ Initial clarification gate:
   and Default if blank.${clarificationRequired}`;
 }
 
-function buildReviewProtocolInstruction(): string {
-  return `Review protocol for this turn:
+function buildReviewGuidanceInstruction(): string {
+  return `Review guidance for this turn:
 - Do not merely agree with Exec.
-- Clarify the user problem, reduce scope, separate must-have/nice-to-have/out-of-scope work,
-  challenge the plan/result, and provide concrete validation or test cases.
-- Return exactly these sections with non-empty values:
-  PROBLEM_FRAMING:
-  SCOPE_REDUCTION:
-  MUST_HAVE:
-  NICE_TO_HAVE:
-  OUT_OF_SCOPE:
-  ASSUMPTIONS_OR_CLARIFICATIONS:
-  CHALLENGE_CASES:
-  VALIDATION_CASES:
-  BLOCKING_FINDINGS: none | <blocking findings>
-- If any required section cannot be completed, return REVIEW_INCOMPLETE and explain what is missing.
-- BLOCKING_FINDINGS may be "none" only after challenge and validation cases are concrete.`;
+- Review the goal, task, Exec output, assumptions, risks, scope, and validation path.
+- You may write naturally; no fixed output sections are required by Runtime.
+- State your strongest concerns, missing decisions, suggested scope reductions,
+  concrete validation ideas, and whether the plan/result looks ready for Judge.
+- You are expected to run concrete validation when correctness depends on it:
+  local scripts/tests, network/API checks, artifact inspection, and full eval runs
+  within the approved scope. Do not rely on Exec's claims when you can verify them.
+- If the orchestrator task asks you to avoid a validation step that is required by
+  the acceptance criteria, treat that as a conflict and report the required validation
+  instead of approving weaker evidence.
+- If human input is required before the plan can be correct, return CLARIFICATION_BLOCKED
+  with the blocking question, options, and Default if blank.
+- If review or validation is blocked by permissions, return PERMISSION_BLOCKED
+  with the blocked action and why approval is needed.`;
 }
 
 function buildJudgeProtocolInstruction(): string {
@@ -699,69 +807,6 @@ function isExecuteApprovedPlanTask(task: string): boolean {
   return /^\s*EXECUTE_APPROVED_PLAN\b/i.test(task);
 }
 
-function validateReviewOutput(output: string | undefined): ReviewValidation {
-  const text = output ?? "";
-  const sections = new Map<ReviewProtocolSection, string>();
-  for (const section of reviewProtocolSections) {
-    const value = extractReviewSection(text, section);
-    if (value !== undefined) {
-      sections.set(section, value);
-    }
-  }
-
-  const missing = reviewProtocolSections.filter((section) => !sections.has(section));
-  const empty = reviewProtocolSections.filter((section) => {
-    const value = sections.get(section);
-    return value !== undefined && value.trim().length === 0;
-  });
-  const weak = reviewProtocolSections.filter((section) => {
-    if (section !== "CHALLENGE_CASES" && section !== "VALIDATION_CASES") {
-      return false;
-    }
-    return isWeakReviewSectionValue(sections.get(section));
-  });
-  const blockingFindings = sections.get("BLOCKING_FINDINGS")?.trim() ?? "";
-  const hasNoBlockingFindings = /^none\b/i.test(blockingFindings);
-
-  return {
-    passed: missing.length === 0 && empty.length === 0 && weak.length === 0 && hasNoBlockingFindings,
-    missing,
-    empty,
-    weak,
-    hasNoBlockingFindings
-  };
-}
-
-function isWeakReviewSectionValue(value: string | undefined): boolean {
-  const normalized = (value ?? "").trim().toLowerCase();
-  if (!normalized) return false;
-  if (normalized.length < 20) return true;
-  return /^(ok|okay|none|n\/a|na|pass|passed|looks good|no issues)\.?$/i.test(normalized);
-}
-
-function extractReviewSection(text: string, section: ReviewProtocolSection): string | undefined {
-  const sectionPattern = reviewProtocolSections.map(escapeRegExp).join("|");
-  const pattern = new RegExp(`^${escapeRegExp(section)}:\\s*([\\s\\S]*?)(?=^(${sectionPattern}):\\s*|\\s*$)`, "im");
-  return text.match(pattern)?.[1]?.trim();
-}
-
-function formatReviewValidationFailure(validation: ReviewValidation): string {
-  const parts = ["Runtime blocked Review approval because Review output did not satisfy the required protocol."];
-  if (validation.missing.length > 0) {
-    parts.push(`Missing sections: ${validation.missing.join(", ")}.`);
-  }
-  if (validation.empty.length > 0) {
-    parts.push(`Empty sections: ${validation.empty.join(", ")}.`);
-  }
-  if (validation.weak.length > 0) {
-    parts.push(`Weak sections: ${validation.weak.join(", ")} must contain concrete cases, not placeholders.`);
-  }
-  if (!validation.hasNoBlockingFindings) {
-    parts.push("BLOCKING_FINDINGS must be exactly none before Exec can enter EXECUTE_APPROVED_PLAN.");
-  }
-  return parts.join(" ");
-}
-
 function validateJudgeOutput(output: string | undefined): JudgeValidation {
   const text = output ?? "";
   const decision = parseJudgeDecision(text);
@@ -778,6 +823,10 @@ function validateJudgeOutput(output: string | undefined): JudgeValidation {
     missing,
     empty
   };
+}
+
+function containsHardBlockSignal(output: string | undefined): boolean {
+  return /\b(?:CLARIFICATION_BLOCKED|PERMISSION_BLOCKED)\b/.test(output ?? "");
 }
 
 function parseJudgeDecision(text: string): JudgeDecision | undefined {

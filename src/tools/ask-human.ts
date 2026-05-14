@@ -14,6 +14,7 @@ export type HumanQuestionBlock = {
 };
 
 const customAnswerValue = "__MASPL_CUSTOM_ANSWER__";
+const planExecutionApprovalMarker = "Confirm whether runtime should execute the approved plan.";
 
 export function createCliAskHuman(): AskHuman {
   return async (question: string) => {
@@ -24,10 +25,12 @@ export function createCliAskHuman(): AskHuman {
 
     const prompt = formatHumanPrompt(question);
     if (prompt.options.length > 0) {
+      const options = buildSelectChoices(question);
       const answer = await select({
         message: stripOptions(question),
-        options: buildSelectChoices(question),
-        initialValue: ""
+        options,
+        initialValue: "",
+        maxItems: options.length
       });
       if (isCancel(answer)) {
         return "";
@@ -45,10 +48,12 @@ export function createCliAskHuman(): AskHuman {
 async function askQuestionBlocks(blocks: HumanQuestionBlock[]): Promise<string> {
   const answers: string[] = [];
   for (const [index, block] of blocks.entries()) {
+    const options = buildBlockSelectChoices(block);
     const answer = await select({
       message: `${index + 1}/${blocks.length} ${block.question}`,
-      options: buildBlockSelectChoices(block),
-      initialValue: block.defaultAnswer ?? ""
+      options,
+      initialValue: block.defaultAnswer ?? "",
+      maxItems: options.length
     });
     if (isCancel(answer)) {
       answers.push(formatBlockAnswer(block, ""));
@@ -192,7 +197,7 @@ function formatBlockAnswer(block: HumanQuestionBlock, answer: string): string {
 }
 
 function extractOptions(question: string): string[] {
-  const lines = question.split(/\r?\n/);
+  const lines = optionScopeLines(question);
   return lines
     .map((line) => line.match(/^\s*(?:[-*]|\d+[.)])\s+(.+?)\s*$/)?.[1])
     .filter((value): value is string => Boolean(value))
@@ -200,12 +205,26 @@ function extractOptions(question: string): string[] {
 }
 
 function stripOptions(question: string): string {
-  return question
-    .split(/\r?\n/)
-    .filter((line) => !/^\s*(?:[-*]|\d+[.)])\s+(.+?)\s*$/.test(line))
-    .filter((line) => !/^\s*Default if blank\s*[:：]/i.test(line))
+  const lines = question.split(/\r?\n/);
+  const optionStart = optionScopeStartIndex(lines);
+  return lines
+    .filter((line, index) => {
+      if (index < optionStart) return true;
+      if (/^\s*(?:[-*]|\d+[.)])\s+(.+?)\s*$/.test(line)) return false;
+      return !/^\s*Default if blank\s*[:：]/i.test(line);
+    })
     .join("\n")
     .trim();
+}
+
+function optionScopeLines(question: string): string[] {
+  const lines = question.split(/\r?\n/);
+  return lines.slice(optionScopeStartIndex(lines));
+}
+
+function optionScopeStartIndex(lines: string[]): number {
+  const markerIndex = lines.findIndex((line) => line.trim() === planExecutionApprovalMarker);
+  return markerIndex >= 0 ? markerIndex + 1 : 0;
 }
 
 function isOptionLine(line: string): boolean {

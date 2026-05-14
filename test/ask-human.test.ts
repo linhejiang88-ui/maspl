@@ -127,7 +127,56 @@ Default if blank：3`);
         { value: "政策了解", label: "政策了解" },
         { value: "__MASPL_CUSTOM_ANSWER__", label: "Other / custom answer" }
       ],
-      initialValue: ""
+      initialValue: "",
+      maxItems: 4
+    });
+  });
+
+  it("shows all plan approval choices without treating plan numbering as options", async () => {
+    mockedSelect.mockResolvedValueOnce("Do not execute - stop after the approved plan.");
+
+    const askHuman = createCliAskHuman();
+
+    await expect(
+      askHuman(`Judge returned SATISFIED for PLAN_ONLY version 1. Review the approved plan below before choosing whether to execute it.
+
+Approved PLAN_ONLY output:
+1. Inspect the project.
+2. Write the report.
+
+Confirm whether runtime should execute the approved plan.
+1. Approve execution - continue with EXECUTE_APPROVED_PLAN.
+2. Do not execute - stop after the approved plan.
+3. Modify plan/scope - return to PLAN_ONLY with human feedback.
+Default if blank: Do not execute.`)
+    ).resolves.toBe("Do not execute - stop after the approved plan.");
+
+    expect(mockedSelect).toHaveBeenCalledWith({
+      message: `Judge returned SATISFIED for PLAN_ONLY version 1. Review the approved plan below before choosing whether to execute it.
+
+Approved PLAN_ONLY output:
+1. Inspect the project.
+2. Write the report.
+
+Confirm whether runtime should execute the approved plan.`,
+      options: [
+        { value: "", label: "Use default / leave blank" },
+        {
+          value: "Approve execution - continue with EXECUTE_APPROVED_PLAN.",
+          label: "Approve execution - continue with EXECUTE_APPROVED_PLAN."
+        },
+        {
+          value: "Do not execute - stop after the approved plan.",
+          label: "Do not execute - stop after the approved plan."
+        },
+        {
+          value: "Modify plan/scope - return to PLAN_ONLY with human feedback.",
+          label: "Modify plan/scope - return to PLAN_ONLY with human feedback."
+        },
+        { value: "__MASPL_CUSTOM_ANSWER__", label: "Other / custom answer" }
+      ],
+      initialValue: "",
+      maxItems: 5
     });
   });
 
@@ -173,7 +222,8 @@ Answer: 报告 + 表格附录：兼顾阅读和结构化复用。`);
         },
         { value: "", label: "leave blank" }
       ],
-      initialValue: "教育产品/AI 学习产品：重点放知识图谱、题型、诊断评估、内容资源结构。"
+      initialValue: "教育产品/AI 学习产品：重点放知识图谱、题型、诊断评估、内容资源结构。",
+      maxItems: 4
     });
     expect(mockedSelect.mock.calls[1]?.[0]).toMatchObject({
       message: "2/2 最终希望交付什么形式？",

@@ -55,7 +55,8 @@ describe("backend agent sessions", () => {
 
     expect(startedThreads.map((thread) => thread.id)).toEqual(["thread-1", "thread-2"]);
     expect(startedThreads[0]?.options?.sandboxMode).toBe("workspace-write");
-    expect(startedThreads[1]?.options?.sandboxMode).toBe("read-only");
+    expect(startedThreads[1]?.options?.sandboxMode).toBe("workspace-write");
+    expect(startedThreads[1]?.options?.networkAccessEnabled).toBe(true);
 
     const agentSessions = JSON.parse(await readFile(params.log.agentSessionsPath, "utf8"));
     expect(agentSessions.agents.exec.sessionId).toBe("thread-1");
@@ -212,6 +213,7 @@ describe("backend agent sessions", () => {
     await backend.runAgent({ ...params, agent: "exec", task: "PLAN_ONLY: propose an implementation plan" });
 
     expect(options?.sandboxMode).toBe("read-only");
+    expect(options?.networkAccessEnabled).toBe(false);
   });
 
   it("runs Codex agents from the provided working directory", async () => {
@@ -298,23 +300,31 @@ describe("backend agent sessions", () => {
     });
 
     expect(options?.sandboxMode).toBe("workspace-write");
+    expect(options?.networkAccessEnabled).toBe(true);
   });
 
   it("resumes Codex Exec thread with write sandbox after PLAN_ONLY approval", async () => {
     const workspace = path.join("/private/tmp", `maspl-codex-plan-execute-transition-${process.pid}`);
     await mkdir(workspace, { recursive: true });
 
-    const startedSandboxes: unknown[] = [];
-    const resumed: Array<{ id: string; sandboxMode: unknown }> = [];
+    const startedOptions: Array<{ sandboxMode: unknown; networkAccessEnabled: unknown }> = [];
+    const resumed: Array<{ id: string; sandboxMode: unknown; networkAccessEnabled: unknown }> = [];
     const sdk: CodexSdkModule = {
       Codex: class {
         startThread(threadOptions?: Record<string, unknown>) {
-          startedSandboxes.push(threadOptions?.sandboxMode);
+          startedOptions.push({
+            sandboxMode: threadOptions?.sandboxMode,
+            networkAccessEnabled: threadOptions?.networkAccessEnabled
+          });
           return codexThread("thread-1", "plan");
         }
 
         resumeThread(id: string, threadOptions?: Record<string, unknown>) {
-          resumed.push({ id, sandboxMode: threadOptions?.sandboxMode });
+          resumed.push({
+            id,
+            sandboxMode: threadOptions?.sandboxMode,
+            networkAccessEnabled: threadOptions?.networkAccessEnabled
+          });
           return codexThread(id, "implemented");
         }
       }
@@ -336,8 +346,8 @@ describe("backend agent sessions", () => {
       taskInstruction: "EXECUTE_APPROVED_PLAN: implement."
     });
 
-    expect(startedSandboxes).toEqual(["read-only"]);
-    expect(resumed).toEqual([{ id: "thread-1", sandboxMode: "workspace-write" }]);
+    expect(startedOptions).toEqual([{ sandboxMode: "read-only", networkAccessEnabled: false }]);
+    expect(resumed).toEqual([{ id: "thread-1", sandboxMode: "workspace-write", networkAccessEnabled: true }]);
 
     const agentSessions = JSON.parse(await readFile(params.log.agentSessionsPath, "utf8"));
     expect(agentSessions.agents.exec.sessionId).toBe("thread-1");
@@ -438,10 +448,12 @@ describe("backend agent sessions", () => {
     await mkdir(workingDirectory, { recursive: true });
 
     let cwd: unknown;
+    let permissionMode: unknown;
     let prompt = "";
     const sdk: ClaudeSdkModule = {
       async *query(args: { prompt: string; options?: Record<string, unknown> }) {
         cwd = args.options?.cwd;
+        permissionMode = args.options?.permissionMode;
         prompt = args.prompt;
         yield {
           type: "result",
@@ -458,6 +470,7 @@ describe("backend agent sessions", () => {
     await backend.runAgent({ ...params, workingDirectory, agent: "review", task: "review task" });
 
     expect(cwd).toBe(workingDirectory);
+    expect(permissionMode).toBe("acceptEdits");
     expect(prompt).toContain(`Current working directory:\n${workingDirectory}`);
     expect(prompt).toContain(`MASPL workspace:\n${workspace}`);
   });
