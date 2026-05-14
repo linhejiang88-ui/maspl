@@ -23,6 +23,7 @@ type PlanGateState = {
   reviewedPlanVersion: number | undefined;
   judgedPlanVersion: number | undefined;
   humanApprovedPlanVersion: number | undefined;
+  humanDecidedPlanVersion: number | undefined;
   reviewPassed: boolean;
   judgePassed: boolean;
   unresolvedRuntimePermissionBlock: boolean;
@@ -60,6 +61,7 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
     reviewedPlanVersion: undefined,
     judgedPlanVersion: undefined,
     humanApprovedPlanVersion: undefined,
+    humanDecidedPlanVersion: undefined,
     reviewPassed: false,
     judgePassed: false,
     unresolvedRuntimePermissionBlock: false
@@ -83,6 +85,11 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
     const dispatch = await requestDispatch(params, outputs, step);
 
     if (dispatch.nextAgent === "done") {
+      if (shouldRequestPlanExecutionApproval(planGate)) {
+        const approvalOutput = await requestPlanExecutionApproval(params, planGate);
+        outputs.push(approvalOutput);
+        continue;
+      }
       if (planGate.unresolvedRuntimePermissionBlock) {
         const gateBlock =
           "Runtime blocked finalization because a PERMISSION_BLOCKED execution fallback still needs Human confirmation.";
@@ -364,6 +371,7 @@ function updatePlanGate(
     planGate.reviewedPlanVersion = undefined;
     planGate.judgedPlanVersion = undefined;
     planGate.humanApprovedPlanVersion = undefined;
+    planGate.humanDecidedPlanVersion = undefined;
     planGate.reviewPassed = false;
     planGate.judgePassed = false;
     planGate.unresolvedRuntimePermissionBlock = false;
@@ -382,6 +390,7 @@ function updatePlanGate(
       planGate.judgePassed = false;
       planGate.judgedPlanVersion = undefined;
       planGate.humanApprovedPlanVersion = undefined;
+      planGate.humanDecidedPlanVersion = undefined;
     }
     return undefined;
   }
@@ -396,6 +405,7 @@ function updatePlanGate(
     planGate.judgedPlanVersion = planGate.judgePassed ? planGate.planVersion : undefined;
     if (!planGate.judgePassed) {
       planGate.humanApprovedPlanVersion = undefined;
+      planGate.humanDecidedPlanVersion = undefined;
       if (!validation.passed) {
         return formatJudgeValidationFailure(validation);
       }
@@ -556,7 +566,11 @@ function applyHumanPlanExecutionApproval(
   answer: string | undefined
 ): PlanExecutionApprovalDecision {
   const decision = classifyPlanExecutionApproval(answer);
-  if (decision === "approve" && shouldRequestPlanExecutionApproval(planGate)) {
+  const isPendingDecision = shouldRequestPlanExecutionApproval(planGate);
+  if (isPendingDecision) {
+    planGate.humanDecidedPlanVersion = planGate.planVersion;
+  }
+  if (decision === "approve" && isPendingDecision) {
     planGate.humanApprovedPlanVersion = planGate.planVersion;
   } else if (decision !== "approve" && planGate.humanApprovedPlanVersion === planGate.planVersion) {
     planGate.humanApprovedPlanVersion = undefined;
@@ -570,6 +584,7 @@ function shouldRequestPlanExecutionApproval(planGate: PlanGateState): boolean {
   return (
     planGate.judgePassed &&
     planGate.judgedPlanVersion === planGate.planVersion &&
+    planGate.humanDecidedPlanVersion !== planGate.planVersion &&
     planGate.humanApprovedPlanVersion !== planGate.planVersion
   );
 }
@@ -929,7 +944,21 @@ function extractLabeledField(text: string, field: string): string | undefined {
     .map(escapeRegExp)
     .join("|");
   const pattern = new RegExp(`^${escapeRegExp(field)}:\\s*([\\s\\S]*?)(?=^(${fieldPattern}):\\s*|\\s*$)`, "im");
-  return text.match(pattern)?.[1]?.trim();
+  const labeled = text.match(pattern)?.[1]?.trim();
+  if (labeled !== undefined) {
+    return labeled;
+  }
+
+  if (field === "Reason") {
+    const inlineReason = text.match(
+      /^\s*(?:SATISFIED|NOT_SATISFIED|NEED_HUMAN)\b\s+Reason:\s*([\s\S]*?)(?=^(${fieldPattern}):\s*|\s*$)/im
+    )?.[1]?.trim();
+    if (inlineReason !== undefined) {
+      return inlineReason;
+    }
+  }
+
+  return undefined;
 }
 
 function formatJudgeValidationFailure(validation: JudgeValidation): string {

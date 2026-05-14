@@ -509,6 +509,66 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
     expect(questions[0]).toContain("Default if blank: Approve execution.");
   });
 
+  it("requests Runtime approval when Orchestrator tries to finish after inline Judge SATISFIED reason", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-inline-judge-done-approval-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-inline-judge-done-approval-test" });
+    const calls: Array<{ agent: string; task: string }> = [];
+    const questions: string[] = [];
+    let executionDispatched = false;
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec" && params.taskInstruction?.startsWith("PLAN_ONLY")) {
+          return "PLAN_ONLY: concise approved plan.";
+        }
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: review\nTASK:\nReview the PLAN_ONLY proposal.";
+        }
+        if (params.agent === "review") return validReviewOutput();
+        if (params.agent === "orchestrator" && calls.length === 5) {
+          return "NEXT_AGENT: judge\nTASK:\nJudge the reviewed plan.";
+        }
+        if (params.agent === "judge") {
+          return "SATISFIED Reason: The revised PLAN_ONLY_RESULT is executable and no clarification is required before execution gating.";
+        }
+        if (params.agent === "orchestrator" && !executionDispatched && calls.length >= 7) {
+          executionDispatched = true;
+          return "NEXT_AGENT: exec\nTASK:\nEXECUTE_APPROVED_PLAN: execute the approved plan.";
+        }
+        if (params.agent === "exec" && params.taskInstruction?.startsWith("EXECUTE_APPROVED_PLAN")) return "Implemented.";
+        return "NEXT_AGENT: done\nTASK:\nAll done.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async (question) => {
+        questions.push(question);
+        return "";
+      }
+    });
+
+    expect(result).toBe("All done.");
+    expect(questions).toHaveLength(1);
+    expect(questions[0]).toContain("Approved PLAN_ONLY output:");
+    expect(questions[0]).toContain("PLAN_ONLY: concise approved plan.");
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(true);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).not.toContain("Judge output did not satisfy the required protocol");
+  });
+
   it("keeps PLAN_ONLY output in approval prompt after Review and Judge retries", async () => {
     const workspace = path.join("/private/tmp", `maspl-loop-plan-review-judge-retry-${process.pid}`);
     await mkdir(workspace, { recursive: true });
