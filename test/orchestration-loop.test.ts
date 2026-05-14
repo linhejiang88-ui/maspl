@@ -683,6 +683,54 @@ Default if blank: 先按给家长看的学习规划调研处理。`;
     expect(content).not.toContain("Human approval is required after Judge SATISFIED");
   });
 
+  it("blocks Orchestrator custom execution approval when the plan gate is not ready", async () => {
+    const workspace = path.join("/private/tmp", `maspl-loop-custom-approval-not-ready-${process.pid}`);
+    await mkdir(workspace, { recursive: true });
+    const roles = parseRolesConfig(defaultRolesYaml);
+    const log = await createSessionLog({ workspace, goal: "test", runId: "loop-custom-approval-not-ready-test" });
+    const questions: string[] = [];
+    const calls: Array<{ agent: string; task: string }> = [];
+
+    const backend: AgentBackend = {
+      name: "fake",
+      async runAgent(params: AgentRunParams) {
+        calls.push({ agent: params.agent, task: params.task });
+        if (params.agent === "orchestrator" && calls.length === 1) {
+          return "NEXT_AGENT: exec\nTASK:\nPLAN_ONLY: propose the plan.";
+        }
+        if (params.agent === "exec") return "PLAN_ONLY: current plan.";
+        if (params.agent === "orchestrator" && calls.length === 3) {
+          return "NEXT_AGENT: human\nTASK:\nRuntime 再次阻止 EXECUTE_APPROVED_PLAN。请选择：\n1. 批准执行最新版 PLAN_ONLY。\n2. 继续修订。\nDefault if blank: 1";
+        }
+        if (params.agent === "orchestrator" && calls.length === 4) {
+          return "NEXT_AGENT: done\nTASK:\nStopped because Runtime rejected custom approval.";
+        }
+        return "NEXT_AGENT: done\nTASK:\nStopped because Runtime rejected custom approval.";
+      }
+    };
+
+    const result = await runOrchestration({
+      backend,
+      goal: "test",
+      workspace,
+      roles,
+      log,
+      askHuman: async (question) => {
+        questions.push(question);
+        return "批准执行最新版 PLAN_ONLY";
+      }
+    });
+
+    expect(result).toBe("Stopped because Runtime rejected custom approval.");
+    expect(questions).toHaveLength(0);
+    expect(calls.some(isExecExecuteApprovedPlanCall)).toBe(false);
+
+    const content = await readFile(log.path, "utf8");
+    expect(content).toContain("Runtime blocked Orchestrator-owned execution approval");
+    expect(content).toContain("reviewPassed: false");
+    expect(content).toContain("judgePassed: false");
+  });
+
   it("blocks EXECUTE_APPROVED_PLAN when Human does not approve after Judge is satisfied", async () => {
     const workspace = path.join("/private/tmp", `maspl-loop-plan-human-deny-${process.pid}`);
     await mkdir(workspace, { recursive: true });

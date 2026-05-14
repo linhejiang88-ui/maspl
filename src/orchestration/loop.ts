@@ -132,6 +132,23 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
         planGate.unresolvedRuntimePermissionBlock = false;
         continue;
       }
+      if (isPlanExecutionApprovalLikeTask(dispatch.task) && planGate.hasPlan) {
+        const approvalBlock = formatPlanExecutionApprovalNotReady(planGate);
+        await params.log.appendTrace({
+          agent: "Runtime",
+          phase: "error",
+          status: "failed",
+          summary: approvalBlock,
+          input: dispatch.task
+        });
+        outputs.push({
+          agent: "Runtime",
+          task: dispatch.task,
+          output: approvalBlock
+        });
+        planGate.unresolvedRuntimePermissionBlock = false;
+        continue;
+      }
       const answer = await params.askHuman(dispatch.task);
       outputs.push({
         agent: "Human",
@@ -324,7 +341,7 @@ function validatePlanGateDispatch(dispatch: Dispatch, planGate: PlanGateState): 
     planGate.reviewedPlanVersion !== planGate.planVersion ||
     planGate.judgedPlanVersion !== planGate.planVersion
   ) {
-    return "Runtime blocked EXECUTE_APPROVED_PLAN. Exec mode opens only after the current PLAN_ONLY plan has been reviewed, Judge returns SATISFIED, and Human approves execution.";
+    return formatPlanGateNotReadyBlock(planGate);
   }
 
   if (planGate.humanApprovedPlanVersion !== planGate.planVersion) {
@@ -558,9 +575,25 @@ function shouldRequestPlanExecutionApproval(planGate: PlanGateState): boolean {
 }
 
 function isPlanExecutionApprovalLikeTask(task: string): boolean {
-  return /执行批准|批准执行|是否.*执行|execute approved plan|execution approval|approve execution|execute the approved plan/i.test(
+  return /执行批准|批准执行|进入执行|开始执行|确认.*执行|是否.*执行|execute approved plan|execution approval|approve execution|execute the approved plan|start execution/i.test(
     task
   );
+}
+
+function formatPlanGateNotReadyBlock(planGate: PlanGateState): string {
+  return `Runtime blocked EXECUTE_APPROVED_PLAN. Exec mode opens only after the current PLAN_ONLY plan has been reviewed, Judge returns SATISFIED, and Human approves execution.
+Gate status:
+- planVersion: ${planGate.planVersion}
+- reviewPassed: ${planGate.reviewPassed}
+- reviewedPlanVersion: ${planGate.reviewedPlanVersion ?? "(none)"}
+- judgePassed: ${planGate.judgePassed}
+- judgedPlanVersion: ${planGate.judgedPlanVersion ?? "(none)"}
+- humanApprovedPlanVersion: ${planGate.humanApprovedPlanVersion ?? "(none)"}`;
+}
+
+function formatPlanExecutionApprovalNotReady(planGate: PlanGateState): string {
+  return `Runtime blocked Orchestrator-owned execution approval. Runtime owns the execution approval gate and will only ask the human after the current PLAN_ONLY has passed Review and Judge.
+${formatPlanGateNotReadyBlock(planGate)}`;
 }
 
 function buildPlanExecutionApprovalQuestion(planVersion: number, planOutput: string | undefined): string {
