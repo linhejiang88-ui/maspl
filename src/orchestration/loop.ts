@@ -23,6 +23,7 @@ type PlanGateState = {
   reviewedPlanVersion: number | undefined;
   judgedPlanVersion: number | undefined;
   humanApprovedPlanVersion: number | undefined;
+  humanDecidedPlanVersion: number | undefined;
   reviewPassed: boolean;
   judgePassed: boolean;
   unresolvedRuntimePermissionBlock: boolean;
@@ -60,6 +61,7 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
     reviewedPlanVersion: undefined,
     judgedPlanVersion: undefined,
     humanApprovedPlanVersion: undefined,
+    humanDecidedPlanVersion: undefined,
     reviewPassed: false,
     judgePassed: false,
     unresolvedRuntimePermissionBlock: false
@@ -83,6 +85,11 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
     const dispatch = await requestDispatch(params, outputs, step);
 
     if (dispatch.nextAgent === "done") {
+      if (shouldRequestPlanExecutionApproval(planGate)) {
+        const approvalOutput = await requestPlanExecutionApproval(params, planGate);
+        outputs.push(approvalOutput);
+        continue;
+      }
       if (planGate.unresolvedRuntimePermissionBlock) {
         const gateBlock =
           "Runtime blocked finalization because a PERMISSION_BLOCKED execution fallback still needs Human confirmation.";
@@ -114,6 +121,41 @@ export async function runOrchestration(params: RunOrchestrationParams): Promise<
     }
 
     if (dispatch.nextAgent === "human") {
+      if (shouldRequestPlanExecutionApproval(planGate)) {
+        const approvalOutput = await requestPlanExecutionApproval(params, planGate);
+        outputs.push(approvalOutput);
+        planGate.unresolvedRuntimePermissionBlock = false;
+        continue;
+      }
+      if (
+        planGate.humanApprovedPlanVersion === planGate.planVersion &&
+        isPlanExecutionApprovalLikeTask(dispatch.task)
+      ) {
+        outputs.push({
+          agent: "Human",
+          task: dispatch.task,
+          output: "PLAN_EXECUTION_APPROVED: Runtime ignored duplicate Orchestrator execution-approval prompt because the current plan is already approved."
+        });
+        planGate.unresolvedRuntimePermissionBlock = false;
+        continue;
+      }
+      if (isPlanExecutionApprovalLikeTask(dispatch.task) && planGate.hasPlan) {
+        const approvalBlock = formatPlanExecutionApprovalNotReady(planGate);
+        await params.log.appendTrace({
+          agent: "Runtime",
+          phase: "error",
+          status: "failed",
+          summary: approvalBlock,
+          input: dispatch.task
+        });
+        outputs.push({
+          agent: "Runtime",
+          task: dispatch.task,
+          output: approvalBlock
+        });
+        planGate.unresolvedRuntimePermissionBlock = false;
+        continue;
+      }
       const answer = await params.askHuman(dispatch.task);
       outputs.push({
         agent: "Human",
@@ -306,7 +348,7 @@ function validatePlanGateDispatch(dispatch: Dispatch, planGate: PlanGateState): 
     planGate.reviewedPlanVersion !== planGate.planVersion ||
     planGate.judgedPlanVersion !== planGate.planVersion
   ) {
-    return "Runtime blocked EXECUTE_APPROVED_PLAN. Exec mode opens only after the current PLAN_ONLY plan has been reviewed, Judge returns SATISFIED, and Human approves execution.";
+    return formatPlanGateNotReadyBlock(planGate);
   }
 
   if (planGate.humanApprovedPlanVersion !== planGate.planVersion) {
@@ -329,6 +371,7 @@ function updatePlanGate(
     planGate.reviewedPlanVersion = undefined;
     planGate.judgedPlanVersion = undefined;
     planGate.humanApprovedPlanVersion = undefined;
+    planGate.humanDecidedPlanVersion = undefined;
     planGate.reviewPassed = false;
     planGate.judgePassed = false;
     planGate.unresolvedRuntimePermissionBlock = false;
@@ -347,6 +390,7 @@ function updatePlanGate(
       planGate.judgePassed = false;
       planGate.judgedPlanVersion = undefined;
       planGate.humanApprovedPlanVersion = undefined;
+      planGate.humanDecidedPlanVersion = undefined;
     }
     return undefined;
   }
@@ -361,6 +405,7 @@ function updatePlanGate(
     planGate.judgedPlanVersion = planGate.judgePassed ? planGate.planVersion : undefined;
     if (!planGate.judgePassed) {
       planGate.humanApprovedPlanVersion = undefined;
+      planGate.humanDecidedPlanVersion = undefined;
       if (!validation.passed) {
         return formatJudgeValidationFailure(validation);
       }
@@ -408,6 +453,10 @@ Required approval: Ask the human whether to fix the environment and retry, appro
 }
 
 function validateMetricEvidenceClaim(dispatch: Dispatch, output: string | undefined): string | undefined {
+  if (dispatch.nextAgent === "review" && isPlanOnlyReviewTask(dispatch.task)) {
+    return undefined;
+  }
+
   if (
     dispatch.nextAgent !== "review" &&
     dispatch.nextAgent !== "judge" &&
@@ -442,6 +491,10 @@ function usesUncomputedMetricEvidence(text: string): boolean {
   return /分析(?:认为|估计|判断)?|估算|预估|预测|预计|预期|推测|大概|约(?:为|等于)?|理论上|应(?:该|能|可)|可能(?:达到|为)|expected|estimate[sd]?|estimated|predict(?:ed|ion)?|projected|approximately|around|about|should\s+(?:reach|be|pass)|likely\s+(?:reach|be|pass)/i.test(
     text
   );
+}
+
+function isPlanOnlyReviewTask(task: string): boolean {
+  return /\bPLAN_ONLY\b|PLAN_ONLY_RESULT/.test(task);
 }
 
 function explicitlyRejectsMetricEvidence(text: string): boolean {
@@ -507,12 +560,7 @@ async function requestPlanExecutionApproval(
 ): Promise<AgentOutput> {
   const question = buildPlanExecutionApprovalQuestion(planGate.planVersion, planGate.planOutput);
   const answer = await params.askHuman(question);
-  const decision = classifyPlanExecutionApproval(answer);
-  if (decision === "approve") {
-    planGate.humanApprovedPlanVersion = planGate.planVersion;
-  } else if (planGate.humanApprovedPlanVersion === planGate.planVersion) {
-    planGate.humanApprovedPlanVersion = undefined;
-  }
+  const decision = applyHumanPlanExecutionApproval(planGate, answer);
 
   return {
     agent: "Human",
@@ -521,14 +569,54 @@ async function requestPlanExecutionApproval(
   };
 }
 
+function applyHumanPlanExecutionApproval(
+  planGate: PlanGateState,
+  answer: string | undefined
+): PlanExecutionApprovalDecision {
+  const decision = classifyPlanExecutionApproval(answer);
+  const isPendingDecision = shouldRequestPlanExecutionApproval(planGate);
+  if (isPendingDecision) {
+    planGate.humanDecidedPlanVersion = planGate.planVersion;
+  }
+  if (decision === "approve" && isPendingDecision) {
+    planGate.humanApprovedPlanVersion = planGate.planVersion;
+  } else if (decision !== "approve" && planGate.humanApprovedPlanVersion === planGate.planVersion) {
+    planGate.humanApprovedPlanVersion = undefined;
+  }
+  return decision;
+}
+
 type PlanExecutionApprovalDecision = "approve" | "deny" | "modify";
 
 function shouldRequestPlanExecutionApproval(planGate: PlanGateState): boolean {
   return (
     planGate.judgePassed &&
     planGate.judgedPlanVersion === planGate.planVersion &&
+    planGate.humanDecidedPlanVersion !== planGate.planVersion &&
     planGate.humanApprovedPlanVersion !== planGate.planVersion
   );
+}
+
+function isPlanExecutionApprovalLikeTask(task: string): boolean {
+  return /执行批准|批准执行|进入执行|开始执行|确认.*执行|是否.*执行|execute approved plan|execution approval|approve execution|execute the approved plan|start execution/i.test(
+    task
+  );
+}
+
+function formatPlanGateNotReadyBlock(planGate: PlanGateState): string {
+  return `Runtime blocked EXECUTE_APPROVED_PLAN. Exec mode opens only after the current PLAN_ONLY plan has been reviewed, Judge returns SATISFIED, and Human approves execution.
+Gate status:
+- planVersion: ${planGate.planVersion}
+- reviewPassed: ${planGate.reviewPassed}
+- reviewedPlanVersion: ${planGate.reviewedPlanVersion ?? "(none)"}
+- judgePassed: ${planGate.judgePassed}
+- judgedPlanVersion: ${planGate.judgedPlanVersion ?? "(none)"}
+- humanApprovedPlanVersion: ${planGate.humanApprovedPlanVersion ?? "(none)"}`;
+}
+
+function formatPlanExecutionApprovalNotReady(planGate: PlanGateState): string {
+  return `Runtime blocked Orchestrator-owned execution approval. Runtime owns the execution approval gate and will only ask the human after the current PLAN_ONLY has passed Review and Judge.
+${formatPlanGateNotReadyBlock(planGate)}`;
 }
 
 function buildPlanExecutionApprovalQuestion(planVersion: number, planOutput: string | undefined): string {
@@ -541,12 +629,12 @@ Confirm whether runtime should execute the approved plan.
 1. Approve execution - continue with EXECUTE_APPROVED_PLAN.
 2. Do not execute - stop after the approved plan.
 3. Modify plan/scope - return to PLAN_ONLY with human feedback.
-Default if blank: Do not execute.`;
+Default if blank: Approve execution.`;
 }
 
 function classifyPlanExecutionApproval(answer: string | undefined): PlanExecutionApprovalDecision {
   const normalized = answer?.trim().toLowerCase() ?? "";
-  if (!normalized) return "deny";
+  if (!normalized) return "approve";
   if (
     /^(2|deny|no|n|stop)\b/.test(normalized) ||
     normalized.includes("do not execute") ||
@@ -556,6 +644,8 @@ function classifyPlanExecutionApproval(answer: string | undefined): PlanExecutio
   }
   if (
     /^(1|approve|approved|yes|y)\b/.test(normalized) ||
+    normalized.includes("use default") ||
+    normalized.includes("leave blank") ||
     normalized.includes("approve execution") ||
     /批准|同意|允许|可以执行|开始执行|继续执行|执行计划/.test(normalized)
   ) {
@@ -645,6 +735,9 @@ Planning gate:
 - A PLAN_ONLY output must go to review, then judge.
 - Exec mode opens only after the current PLAN_ONLY plan has been reviewed, Judge returns SATISFIED, and Human approves execution.
 - Do not choose exec with EXECUTE_APPROVED_PLAN until all three conditions are true.
+- After Judge returns SATISFIED for PLAN_ONLY, do not choose NEXT_AGENT: human to ask
+  your own execution-approval question. Runtime owns that approval gate, will show
+  the approved PLAN_ONLY output, and will record the internal approval state.
 - If Human does not approve execution after Judge SATISFIED, finish with the approved plan or return to PLAN_ONLY with the human feedback.
 - If judge rejects the plan, send the requested plan improvements back to exec in PLAN_ONLY mode.
 - For narrow deterministic goals, direct execution is allowed, but review should still define or run concrete validation.
@@ -859,7 +952,21 @@ function extractLabeledField(text: string, field: string): string | undefined {
     .map(escapeRegExp)
     .join("|");
   const pattern = new RegExp(`^${escapeRegExp(field)}:\\s*([\\s\\S]*?)(?=^(${fieldPattern}):\\s*|\\s*$)`, "im");
-  return text.match(pattern)?.[1]?.trim();
+  const labeled = text.match(pattern)?.[1]?.trim();
+  if (labeled !== undefined) {
+    return labeled;
+  }
+
+  if (field === "Reason") {
+    const inlineReason = text.match(
+      /^\s*(?:SATISFIED|NOT_SATISFIED|NEED_HUMAN)\b\s+Reason:\s*([\s\S]*?)(?=^(${fieldPattern}):\s*|\s*$)/im
+    )?.[1]?.trim();
+    if (inlineReason !== undefined) {
+      return inlineReason;
+    }
+  }
+
+  return undefined;
 }
 
 function formatJudgeValidationFailure(validation: JudgeValidation): string {

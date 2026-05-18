@@ -148,7 +148,7 @@ Confirm whether runtime should execute the approved plan.
 1. Approve execution - continue with EXECUTE_APPROVED_PLAN.
 2. Do not execute - stop after the approved plan.
 3. Modify plan/scope - return to PLAN_ONLY with human feedback.
-Default if blank: Do not execute.`)
+Default if blank: Approve execution.`)
     ).resolves.toBe("Do not execute - stop after the approved plan.");
 
     expect(mockedSelect).toHaveBeenCalledWith({
@@ -160,7 +160,6 @@ Approved PLAN_ONLY output:
 
 Confirm whether runtime should execute the approved plan.`,
       options: [
-        { value: "", label: "Use default / leave blank" },
         {
           value: "Approve execution - continue with EXECUTE_APPROVED_PLAN.",
           label: "Approve execution - continue with EXECUTE_APPROVED_PLAN."
@@ -175,8 +174,8 @@ Confirm whether runtime should execute the approved plan.`,
         },
         { value: "__MASPL_CUSTOM_ANSWER__", label: "Other / custom answer" }
       ],
-      initialValue: "",
-      maxItems: 5
+      initialValue: "Approve execution - continue with EXECUTE_APPROVED_PLAN.",
+      maxItems: 4
     });
   });
 
